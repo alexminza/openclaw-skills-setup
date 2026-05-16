@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Package artifacts
+*.tgz
+*.tar.gz
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Runtime/cache directories
+.cache/
+.temp/
+.tmp/
+tmp/
+temp/
+
+# Coverage
+coverage/
+.nyc_output/
+
+# Local environment/config
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# OpenClaw/ClawHub local install state
+.openclaw/
+.clawhub/
+
+# Editor and OS metadata
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
