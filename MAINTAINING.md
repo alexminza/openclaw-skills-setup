@@ -66,11 +66,12 @@ Those tasks run the equivalent of:
 ```bash
 VERSION=$(node -p "require('./package.json').version")
 COMMIT=$(git rev-list -n 1 "v$VERSION")
-clawhub package publish "$PWD" --family code-plugin --version "$VERSION" --source-repo alexminza/openclaw-skills-setup --source-commit "$COMMIT" --source-ref "v$VERSION" --dry-run
-clawhub package publish "$PWD" --family code-plugin --version "$VERSION" --source-repo alexminza/openclaw-skills-setup --source-commit "$COMMIT" --source-ref "v$VERSION"
+SOURCE_REPO=$(git remote get-url origin)
+clawhub package publish "$PWD" --family code-plugin --version "$VERSION" --source-repo "$SOURCE_REPO" --source-commit "$COMMIT" --source-ref "v$VERSION" --dry-run
+clawhub package publish "$PWD" --family code-plugin --version "$VERSION" --source-repo "$SOURCE_REPO" --source-commit "$COMMIT" --source-ref "v$VERSION"
 ```
 
 Both tasks read the version from `package.json` and publish with
-`--source-ref v<version>`, `--source-repo`, and the tag's commit SHA. They
-depend on `Release: Verify Version Tag`, which fails if the matching version tag
-does not exist locally and on `origin`.
+`--source-ref v<version>`, `--source-repo` derived from `origin`, and the tag's
+commit SHA. They depend on `Release: Verify Version Tag`, which fails if the
+matching version tag does not exist locally and on `origin`.

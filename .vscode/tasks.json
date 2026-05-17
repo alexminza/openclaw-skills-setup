@@ -60,7 +60,7 @@
     {
       "label": "ClawHub: Publish Dry Run",
       "type": "shell",
-      "command": "VERSION=$(node -p \"require('./package.json').version\"); COMMIT=$(git rev-list -n 1 \"v$VERSION\"); clawhub package publish \"${workspaceFolder}\" --family code-plugin --version \"$VERSION\" --source-repo alexminza/openclaw-skills-setup --source-commit \"$COMMIT\" --source-ref \"v$VERSION\" --dry-run",
+      "command": "VERSION=$(node -p \"require('./package.json').version\"); COMMIT=$(git rev-list -n 1 \"v$VERSION\"); SOURCE_REPO=$(git remote get-url origin); clawhub package publish \"${workspaceFolder}\" --family code-plugin --version \"$VERSION\" --source-repo \"$SOURCE_REPO\" --source-commit \"$COMMIT\" --source-ref \"v$VERSION\" --dry-run",
       "options": {
         "cwd": "${workspaceFolder}"
       },
@@ -73,7 +73,7 @@
     {
       "label": "ClawHub: Publish",
       "type": "shell",
-      "command": "VERSION=$(node -p \"require('./package.json').version\"); COMMIT=$(git rev-list -n 1 \"v$VERSION\"); clawhub package publish \"${workspaceFolder}\" --family code-plugin --version \"$VERSION\" --source-repo alexminza/openclaw-skills-setup --source-commit \"$COMMIT\" --source-ref \"v$VERSION\"",
+      "command": "VERSION=$(node -p \"require('./package.json').version\"); COMMIT=$(git rev-list -n 1 \"v$VERSION\"); SOURCE_REPO=$(git remote get-url origin); clawhub package publish \"${workspaceFolder}\" --family code-plugin --version \"$VERSION\" --source-repo \"$SOURCE_REPO\" --source-commit \"$COMMIT\" --source-ref \"v$VERSION\"",
       "options": {
         "cwd": "${workspaceFolder}"
       },
