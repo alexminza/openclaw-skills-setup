@@ -1,0 +1,85 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Release: Prepare",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "NPM: Check",
+        "NPM: Test",
+        "NPM: Build",
+        "NPM: Pack Dry Run"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "NPM: Check",
+      "type": "shell",
+      "command": "npm run check",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "NPM: Test",
+      "type": "shell",
+      "command": "npm test",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "NPM: Build",
+      "type": "shell",
+      "command": "npm run build",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "NPM: Pack Dry Run",
+      "type": "shell",
+      "command": "npm pack --dry-run",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Release: Verify Version Tag",
+      "type": "shell",
+      "command": "VERSION=$(node -p \"require('./package.json').version\"); TAG=\"v$VERSION\"; if ! git rev-parse --verify --quiet \"refs/tags/$TAG\" >/dev/null; then echo \"Missing local release tag $TAG. Create it before running publish tasks.\"; exit 1; fi; if ! git ls-remote --exit-code --tags origin \"refs/tags/$TAG\" >/dev/null; then echo \"Missing remote release tag $TAG on origin. Push it before running publish tasks.\"; exit 1; fi; echo \"Found local and remote release tag $TAG\"",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "ClawHub: Publish Dry Run",
+      "type": "shell",
+      "command": "VERSION=$(node -p \"require('./package.json').version\"); clawhub package publish \"${workspaceFolder}\" --family code-plugin --version \"$VERSION\" --source-ref \"v$VERSION\" --dry-run",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "dependsOn": [
+        "Release: Verify Version Tag"
+      ]
+    },
+    {
+      "label": "ClawHub: Publish",
+      "type": "shell",
+      "command": "VERSION=$(node -p \"require('./package.json').version\"); clawhub package publish \"${workspaceFolder}\" --family code-plugin --version \"$VERSION\" --source-ref \"v$VERSION\"",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "dependsOn": [
+        "ClawHub: Publish Dry Run"
+      ]
+    }
+  ]
+}
