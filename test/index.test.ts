@@ -312,6 +312,37 @@ metadata:
     });
   });
 
+  it("reads nested setup metadata when parent keys have trailing comments", async () => {
+    const workspaceDir = await makeTempDir();
+    const skill = await writeSkill({
+      workspaceDir,
+      relativeDir: "commented",
+      frontmatter: `
+metadata: # skill metadata
+  openclaw: # OpenClaw-specific settings
+    setup: # setup declaration
+      script: scripts/setup.sh # relative setup script
+`,
+    });
+    const { handler } = registerSkillsSetupPlugin({ workspaceDir, config: {} });
+
+    const respond = await callGatewayMethod({
+      handler,
+      config: {},
+      requestParams: { slug: "commented" },
+    });
+
+    expect(respond).toHaveBeenCalledWith(true, { code: 0, stdout: "setup ok", stderr: "" });
+    expect(commandMocks.runPluginCommandWithTimeout).toHaveBeenCalledWith({
+      argv: ["bash", skill.scriptPathReal],
+      cwd: skill.skillDirReal,
+      env: {
+        SKILL_DIR: skill.skillDirReal,
+      },
+      timeoutMs: 120_000,
+    });
+  });
+
   it("rejects ambiguous grouped basename selectors", async () => {
     const workspaceDir = await makeTempDir();
     await writeSkill({
@@ -387,6 +418,48 @@ metadata: '{"openclaw":{"skillKey":"json-skill-key","setup":{"script":"setup.sh"
       cwd: skill.skillDirReal,
       env: {
         JSON_SKILL_ENV: "enabled",
+        SKILL_DIR: skill.skillDirReal,
+      },
+      timeoutMs: 120_000,
+    });
+  });
+
+  it("reads multi-line JSON metadata when metadata key has a trailing comment", async () => {
+    const workspaceDir = await makeTempDir();
+    const skill = await writeSkill({
+      workspaceDir,
+      relativeDir: "json-commented",
+      scriptPath: "setup.sh",
+      frontmatter: `
+metadata: # JSON-shaped OpenClaw metadata
+  {"openclaw":{"skillKey":"json-commented-key","setup":{"script":"setup.sh"}}}
+`,
+    });
+    const config = {
+      skills: {
+        entries: {
+          "json-commented-key": {
+            env: {
+              JSON_COMMENTED_ENV: "enabled",
+            },
+          },
+        },
+      },
+    };
+    const { handler } = registerSkillsSetupPlugin({ workspaceDir, config });
+
+    const respond = await callGatewayMethod({
+      handler,
+      config,
+      requestParams: { slug: "json-commented" },
+    });
+
+    expect(respond).toHaveBeenCalledWith(true, { code: 0, stdout: "setup ok", stderr: "" });
+    expect(commandMocks.runPluginCommandWithTimeout).toHaveBeenCalledWith({
+      argv: ["bash", skill.scriptPathReal],
+      cwd: skill.skillDirReal,
+      env: {
+        JSON_COMMENTED_ENV: "enabled",
         SKILL_DIR: skill.skillDirReal,
       },
       timeoutMs: 120_000,

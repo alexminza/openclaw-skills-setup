@@ -246,6 +246,9 @@ function normalizeScalar(raw: string): string {
   if (!value) {
     return "";
   }
+  if (value.startsWith("#")) {
+    return "";
+  }
   if (
     (value.startsWith('"') && value.endsWith('"')) ||
     (value.startsWith("'") && value.endsWith("'"))
@@ -368,13 +371,14 @@ function parseIndentedSetupMetadata(frontmatter: string): SetupMetadata | undefi
     }
     const pathKeys = [...stack.map((entry) => entry.key), key];
     const pathKey = pathKeys.join(".");
-    if (pathKey === "metadata.openclaw.setup.script" && rawValue.trim()) {
-      metadata.script = normalizeScalar(rawValue);
+    const normalizedValue = normalizeScalar(rawValue);
+    if (pathKey === "metadata.openclaw.setup.script" && normalizedValue) {
+      metadata.script = normalizedValue;
     }
-    if (pathKey === "metadata.openclaw.skillKey" && rawValue.trim()) {
-      metadata.skillKey = normalizeScalar(rawValue);
+    if (pathKey === "metadata.openclaw.skillKey" && normalizedValue) {
+      metadata.skillKey = normalizedValue;
     }
-    if (!rawValue.trim()) {
+    if (!normalizedValue) {
       stack.push({ indent, key });
     }
   }
@@ -394,7 +398,8 @@ function parseMetadataValueSetupMetadata(frontmatter: string): SetupMetadata | u
       continue;
     }
     const rawValue = match[1] ?? "";
-    if (rawValue.trim() && !isYamlBlockScalarIndicator(rawValue)) {
+    const normalizedValue = normalizeScalar(rawValue);
+    if (normalizedValue && !isYamlBlockScalarIndicator(normalizedValue)) {
       return parseSetupMetadataFromManifestText(rawValue);
     }
 
