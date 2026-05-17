@@ -13,12 +13,16 @@ import { isPathInside } from "openclaw/plugin-sdk/security-runtime";
 // the point of this plugin, so the Gateway method is admin-only and path/env
 // boundaries are enforced before invoking a skill-supplied setup script.
 
-// SDK gap: at openclaw@2026.5.5 the plugin SDK does not re-export the skills-
-// registry helpers (loadWorkspaceSkillEntries, parseSkillFrontmatter,
-// resolveOpenClawMetadata). Those live under src/agents/skills/* but the
-// published package's `exports` map limits plugin imports to ./plugin-sdk/*.
-// Until upstream surfaces them via ./plugin-sdk/skills-runtime (or similar),
-// this plugin resolves skill directories and parses frontmatter directly.
+// SDK gap tracked upstream by openclaw/openclaw#81913:
+// https://github.com/openclaw/openclaw/issues/81913
+// At openclaw@2026.5.5 the plugin SDK does not expose a stable installed-skill
+// workflow surface for skill discovery, structured metadata, skill config,
+// skill-local path resolution, or setup-mode env sanitization. The underlying
+// helpers live under src/agents/skills/* and src/infra/*, but the published
+// package's `exports` map limits plugin imports to ./plugin-sdk/*. Until
+// upstream ships public SDK contracts for them, this plugin resolves skill
+// directories, parses frontmatter, validates setup paths, reads skill env
+// config, and sanitizes setup env overlays directly.
 
 const METHOD_NAME = "skills.setup";
 const PLUGIN_ID = "skills-setup";
@@ -235,12 +239,13 @@ async function resolveInstalledSkillDir({
 
 // #region SDK gap: setup script metadata parsing
 
-// SDK gap: OpenClaw has internal SKILL.md frontmatter helpers, but they are not
-// exported through `openclaw/plugin-sdk/*`.
-// Needed public surface: `parseSkillFrontmatter()` + `resolveOpenClawMetadata()`
-// or a narrower `resolveSkillSetupScript()` helper. That would replace
-// normalizeScalar(), extractFrontmatterBlock(), parseIndentedSetupScript(), and
-// parseSetupScriptFromSkillMarkdown().
+// SDK gap tracked by openclaw/openclaw#81913: OpenClaw has internal SKILL.md
+// frontmatter helpers, but they are not exported through
+// `openclaw/plugin-sdk/*` in openclaw@2026.5.5.
+// Needed public surface: `parseFrontmatter()` + `resolveOpenClawMetadata()` or
+// a narrower `resolveSkillSetupScript()` helper. That would replace
+// normalizeScalar(), extractFrontmatterBlock(), parseIndentedSetupMetadata(),
+// parseMetadataValueSetupMetadata(), and parseSetupMetadataFromSkillMarkdown().
 function normalizeScalar(raw: string): string {
   const value = raw.trim();
   if (!value) {
@@ -431,9 +436,11 @@ function parseSetupMetadataFromSkillMarkdown(markdown: string): SetupMetadata | 
 
 // #region SDK gap: setup script path resolution
 
-// SDK gap: OpenClaw does not expose a public resolver for an installed skill's
-// setup script. Needed public surface: `resolveSkillSetupScriptPath(skillDir)`
-// that reads the supported metadata shape and enforces the same path boundary.
+// SDK gap tracked by openclaw/openclaw#81913: OpenClaw does not expose a public
+// resolver for an installed skill's setup script. Needed public surface:
+// `resolveSkillSetupScriptPath(skillDir)` or composition from public
+// frontmatter helpers that reads the supported metadata shape and enforces the
+// same path boundary.
 async function resolveSetupScriptPath(skillDir: string): Promise<SetupScriptResolution | undefined> {
   const skillMarkdown = await readFile(path.join(skillDir, "SKILL.md"), "utf8");
   const metadata = parseSetupMetadataFromSkillMarkdown(skillMarkdown);
@@ -460,12 +467,14 @@ async function resolveSetupScriptPath(skillDir: string): Promise<SetupScriptReso
 
 // #region SDK gap: setup env overlay
 
-// SDK gap: OpenClaw does not expose a setup-env sanitizer that allows
-// operator-provided credential vars while blocking only execution-context
-// overrides. The generic sandbox sanitizer blocks token-like keys, which is
-// wrong for this setup hook. Needed public surface: `sanitizeSetupEnvOverlay()`.
-// Allowed credential variables remain visible to the setup script; callers must
-// pass them only to trusted skills and prefer narrowly scoped secrets.
+// SDK gap tracked by openclaw/openclaw#81913: OpenClaw does not expose a setup-
+// env sanitizer that allows operator-provided credential vars while blocking
+// only execution-context overrides. The generic sandbox sanitizer blocks token-
+// like keys, which is wrong for this setup hook. Needed public surface:
+// `sanitizeSetupEnvOverlay()` or a documented setup-mode option for the host env
+// sanitizer. Allowed credential variables remain visible to the setup script;
+// callers must pass them only to trusted skills and prefer narrowly scoped
+// secrets.
 function isBlockedSetupEnvEntry(key: string, value: string): boolean {
   const upperKey = key.toUpperCase();
   if (RESERVED_ENV_KEYS.has(upperKey)) {
