@@ -31,7 +31,7 @@ version tag manually:
 VERSION=$(node -p "require('./package.json').version")
 git status --short
 git tag "v$VERSION"
-git push origin main --tags
+git push origin main "v$VERSION"
 ```
 
 After the tag has been pushed, create the GitHub Release manually in GitHub from

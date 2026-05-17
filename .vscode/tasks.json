@@ -66,6 +66,7 @@
       },
       "problemMatcher": [],
       "dependsOn": [
+        "Release: Prepare",
         "Release: Verify Version Tag"
       ]
     },
