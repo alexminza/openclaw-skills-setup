@@ -1,15 +1,9 @@
+import type { SkillsSetupApi, SkillsSetupHandlerOptions } from "./skills-setup.impl.js";
+
 const METHOD_NAME = "skills.setup";
 
-type GatewayRequestHandlerOptions = {
-  params?: Record<string, unknown>;
-  respond: (ok: boolean, result: unknown, error?: unknown) => void;
-  context: {
-    getRuntimeConfig: () => unknown;
-  };
-};
-
 type GatewayRequestHandler = (
-  options: GatewayRequestHandlerOptions,
+  options: SkillsSetupHandlerOptions,
 ) => Promise<void> | void;
 
 type PluginApi = {
@@ -18,7 +12,7 @@ type PluginApi = {
     handler: GatewayRequestHandler,
     options: { scope: string },
   ) => void;
-};
+} & SkillsSetupApi;
 
 export default {
   id: "skills-setup",

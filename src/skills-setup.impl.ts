@@ -1,12 +1,8 @@
-import { spawn } from "node:child_process";
 import { access, readFile, readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
-import type { GatewayRequestHandlerOptions } from "openclaw/plugin-sdk/gateway-runtime";
-import type {
-  OpenClawPluginApi,
-  OpenClawPluginConfigSchema,
-  OpenClawPluginDefinition,
-} from "openclaw/plugin-sdk/plugin-entry";
+import { ErrorCodes, errorShape } from "openclaw/plugin-sdk/gateway-runtime";
+import { runPluginCommandWithTimeout } from "openclaw/plugin-sdk/run-command";
+import { extractErrorCode, isPathInside } from "openclaw/plugin-sdk/security-runtime";
 
 // Plugin-shaped implementation path for openclaw/openclaw#80213:
 // https://github.com/openclaw/openclaw/issues/80213
@@ -26,14 +22,7 @@ import type {
 // directories, parses frontmatter, validates setup paths, reads skill env
 // config, and sanitizes setup env overlays directly.
 
-const METHOD_NAME = "skills.setup";
 const PLUGIN_ID = "skills-setup";
-const ErrorCodes = {
-  INVALID_REQUEST: "INVALID_REQUEST",
-  UNAVAILABLE: "UNAVAILABLE",
-} as const;
-const PARENT_SEGMENT_PATTERN = /^\.\.(?:[\\/]|$)/u;
-const POSIX_SEPARATOR_CHAR_CODE = 47;
 const DEFAULT_AGENT_ID = "main";
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
@@ -70,32 +59,6 @@ const BLOCKED_INHERITED_ENV_KEYS = new Set([
 ]);
 
 type EnvMap = Record<string, string>;
-type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];
-type CommandResult = {
-  code: number;
-  stdout: string;
-  stderr: string;
-};
-type CommandRunnerOptions = {
-  argv: string[];
-  cwd: string;
-  env: NodeJS.ProcessEnv;
-  timeoutMs: number;
-};
-type DefinePluginEntryOptions = {
-  id: string;
-  name: string;
-  description: string;
-  configSchema?: OpenClawPluginConfigSchema | (() => OpenClawPluginConfigSchema);
-  register: (api: OpenClawPluginApi) => void;
-};
-type DefinedPluginEntry = {
-  id: string;
-  name: string;
-  description: string;
-  configSchema?: OpenClawPluginConfigSchema;
-  register: NonNullable<OpenClawPluginDefinition["register"]>;
-};
 
 type SetupMetadata = {
   script?: string;
@@ -107,134 +70,25 @@ type SetupScriptResolution = {
   skillKey?: string;
 };
 
-// Keep runtime SDK helpers local so the published plugin can load through
-// native ESM. OpenClaw 2026.5.5 force-transforms plugins with value imports
-// from openclaw/plugin-sdk/*, which made this plugin dominate startup time.
-function hasErrorCode(error: unknown, code: string): boolean {
-  return Boolean(
-    error &&
-      typeof error === "object" &&
-      "code" in error &&
-      (error as { code?: unknown }).code === code,
-  );
-}
-
-function definePluginEntry({
-  id,
-  name,
-  description,
-  configSchema,
-  register,
-}: DefinePluginEntryOptions): DefinedPluginEntry {
-  return {
-    id,
-    name,
-    description,
-    ...(configSchema ? { configSchema: typeof configSchema === "function" ? configSchema() : configSchema } : {}),
-    register,
+export type SkillsSetupApi = {
+  logger: {
+    debug?: (message: string) => void;
+    warn: (message: string) => void;
   };
-}
-
-function errorShape(code: ErrorCode, message: string): { code: ErrorCode; message: string } {
-  return { code, message };
-}
-
-function formatErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function runPluginCommandWithTimeout(options: CommandRunnerOptions): Promise<CommandResult> {
-  const [command, ...args] = options.argv;
-  if (!command) {
-    return Promise.resolve({
-      code: 1,
-      stdout: "",
-      stderr: "command is required",
-    });
-  }
-
-  return new Promise((resolve) => {
-    let settled = false;
-    let timedOut = false;
-    const stdoutChunks: Buffer[] = [];
-    const stderrChunks: Buffer[] = [];
-    const child = spawn(command, args, {
-      cwd: options.cwd,
-      env: { ...process.env, ...options.env } as NodeJS.ProcessEnv,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    const finish = (result: CommandResult): void => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timer);
-      resolve(result);
+  runtime: {
+    agent: {
+      resolveAgentWorkspaceDir: (config: unknown, agentId: string) => string;
     };
+  };
+};
 
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-    }, options.timeoutMs);
-
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdoutChunks.push(chunk);
-    });
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderrChunks.push(chunk);
-    });
-    child.on("error", (error) => {
-      finish({
-        code: 1,
-        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-        stderr: formatErrorMessage(error),
-      });
-    });
-    child.on("close", (code) => {
-      const stdout = Buffer.concat(stdoutChunks).toString("utf8");
-      const stderr = Buffer.concat(stderrChunks).toString("utf8");
-      finish({
-        code: code ?? 1,
-        stdout,
-        stderr: timedOut && !stderr ? `command timed out after ${options.timeoutMs}ms` : stderr,
-      });
-    });
-  });
-}
-
-let runSetupCommand = runPluginCommandWithTimeout;
-
-export function __setRunPluginCommandWithTimeoutForTest(
-  commandRunner: typeof runPluginCommandWithTimeout | null,
-): void {
-  runSetupCommand = commandRunner ?? runPluginCommandWithTimeout;
-}
-
-function isPathInside(root: string, target: string): boolean {
-  if (process.platform === "win32") {
-    const rootForCompare = path.win32.normalize(path.win32.resolve(root)).toLowerCase();
-    const targetForCompare = path.win32.normalize(path.win32.resolve(target)).toLowerCase();
-    const relative = path.win32.relative(rootForCompare, targetForCompare);
-    return relative === "" || (!PARENT_SEGMENT_PATTERN.test(relative) && !path.win32.isAbsolute(relative));
-  }
-
-  if (
-    root.length > 0 &&
-    root.charCodeAt(0) === POSIX_SEPARATOR_CHAR_CODE &&
-    target.length >= root.length &&
-    target.charCodeAt(0) === POSIX_SEPARATOR_CHAR_CODE &&
-    !target.includes("/..") &&
-    (target === root || (target.startsWith(root) && target.charCodeAt(root.length) === POSIX_SEPARATOR_CHAR_CODE))
-  ) {
-    return true;
-  }
-
-  const resolvedRoot = path.resolve(root);
-  const resolvedTarget = path.resolve(target);
-  const relative = path.relative(resolvedRoot, resolvedTarget);
-  return relative === "" || (!PARENT_SEGMENT_PATTERN.test(relative) && !path.isAbsolute(relative));
-}
+export type SkillsSetupHandlerOptions = {
+  params?: Record<string, unknown>;
+  respond: (ok: boolean, result: unknown, error?: unknown) => void;
+  context: {
+    getRuntimeConfig: () => unknown;
+  };
+};
 
 // #region Basic request/config normalization
 
@@ -285,7 +139,8 @@ function skillNotFound(message: string): Error & { code: typeof ERR_SKILL_NOT_FO
 }
 
 function isInvalidRequestError(error: unknown): boolean {
-  return hasErrorCode(error, ERR_SKILL_NOT_FOUND) || hasErrorCode(error, ERR_INVALID_REQUEST);
+  const code = extractErrorCode(error);
+  return code === ERR_SKILL_NOT_FOUND || code === ERR_INVALID_REQUEST;
 }
 
 async function resolveRealSkillDirCandidate({
@@ -299,7 +154,8 @@ async function resolveRealSkillDirCandidate({
   try {
     candidateDirReal = await realpath(candidateDir);
   } catch (error) {
-    if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
+    const code = extractErrorCode(error);
+    if (code === "ENOENT" || code === "ENOTDIR") {
       return undefined;
     }
     throw error;
@@ -316,7 +172,8 @@ async function resolveRealSkillDirCandidate({
       return undefined;
     }
   } catch (error) {
-    if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
+    const code = extractErrorCode(error);
+    if (code === "ENOENT" || code === "ENOTDIR") {
       return undefined;
     }
     throw error;
@@ -344,7 +201,7 @@ async function resolveInstalledSkillDir({
   try {
     skillsDirReal = await realpath(skillsDir);
   } catch (error) {
-    if (hasErrorCode(error, "ENOENT")) {
+    if (extractErrorCode(error) === "ENOENT") {
       throw skillNotFound(`skill "${selector}" not installed`);
     }
     throw error;
@@ -761,86 +618,82 @@ function resolveTimeoutMs({
 
 // #endregion
 
-// #region Gateway RPC registration
+// #region Gateway RPC handling
 
 function respondError(
-  respond: GatewayRequestHandlerOptions["respond"],
+  respond: SkillsSetupHandlerOptions["respond"],
   code: Parameters<typeof errorShape>[0],
   message: string,
 ): void {
   respond(false, { error: message }, errorShape(code, message));
 }
 
-export default definePluginEntry({
-  id: "skills-setup",
-  name: "Skills Setup",
-  description: "Runs installed skill setup scripts through the admin-only skills.setup gateway RPC.",
-  register(api) {
-    api.registerGatewayMethod(
-      METHOD_NAME,
-      async ({ params, respond, context }) => {
-        const startedAt = Date.now();
-        let selectorForLog = "?";
-        let agentIdForLog = "?";
-        try {
-          const selector = normalizeSkillSelector(params?.slug);
-          const agentId = normalizeAgentId(params?.agentId);
-          selectorForLog = selector;
-          agentIdForLog = agentId;
-          const config = context.getRuntimeConfig();
-          const workspaceDir = api.runtime.agent.resolveAgentWorkspaceDir(config, agentId);
-          const skillDir = await resolveInstalledSkillDir({ workspaceDir, selector });
-          const setupScript = await resolveSetupScriptPath(skillDir);
-          if (!setupScript) {
-            api.logger.debug?.(
-              `skills.setup ${selector} (agent=${agentId}) skipped: no setup script declared`,
-            );
-            respond(true, { code: 0, stdout: "", stderr: "" });
-            return;
-          }
+export async function handleSkillsSetup({
+  api,
+  options,
+}: {
+  api: SkillsSetupApi;
+  options: SkillsSetupHandlerOptions;
+}): Promise<void> {
+  const { params, respond, context } = options;
+  const startedAt = Date.now();
+  let selectorForLog = "?";
+  let agentIdForLog = "?";
+  try {
+    const selector = normalizeSkillSelector(params?.slug);
+    const agentId = normalizeAgentId(params?.agentId);
+    selectorForLog = selector;
+    agentIdForLog = agentId;
+    const config = context.getRuntimeConfig();
+    const workspaceDir = api.runtime.agent.resolveAgentWorkspaceDir(config, agentId);
+    const skillDir = await resolveInstalledSkillDir({ workspaceDir, selector });
+    const setupScript = await resolveSetupScriptPath(skillDir);
+    if (!setupScript) {
+      api.logger.debug?.(
+        `skills.setup ${selector} (agent=${agentId}) skipped: no setup script declared`,
+      );
+      respond(true, { code: 0, stdout: "", stderr: "" });
+      return;
+    }
 
-          const { scriptPath, skillKey = selector } = setupScript;
-          const timeoutMs = resolveTimeoutMs({ config, params });
-          api.logger.debug?.(
-            `skills.setup ${selector} (agent=${agentId}) started: script=${path.relative(skillDir, scriptPath)} timeoutMs=${timeoutMs}`,
-          );
-
-          // Intentionally runs a skill-declared local setup script. The method
-          // is registered with operator.admin scope, setup.script is constrained
-          // to the resolved skill directory, and no completion state is stored,
-          // so setup scripts must be safe to rerun.
-          const result = await runSetupCommand({
-            argv: ["bash", scriptPath],
-            cwd: skillDir,
-            env: buildSetupEnv({
-              configEnv: readSkillConfigEnv(config, skillKey),
-              overlayEnv: normalizeEnvMap(params?.env),
-              skillDir,
-            }),
-            timeoutMs,
-          });
-          api.logger.debug?.(
-            `skills.setup ${selector} (agent=${agentId}) completed: code=${result.code} durationMs=${Date.now() - startedAt}`,
-          );
-          respond(true, result);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : "skill setup failed";
-          // INVALID_REQUEST when the caller-supplied slug doesn't resolve to an
-          // installed skill on this agent — no generic NOT_FOUND code at v2026.5.5
-          // (see openclaw src/gateway/protocol/schema/error-codes.ts). Reserve
-          // UNAVAILABLE for transient / server-side execution failures.
-          const code = isInvalidRequestError(error)
-            ? ErrorCodes.INVALID_REQUEST
-            : ErrorCodes.UNAVAILABLE;
-          api.logger.warn(
-            `skills.setup ${selectorForLog} (agent=${agentIdForLog}) failed: ${message} durationMs=${Date.now() - startedAt}`,
-          );
-          respondError(respond, code, message);
-        }
-      },
-      { scope: "operator.admin" },
+    const { scriptPath, skillKey = selector } = setupScript;
+    const timeoutMs = resolveTimeoutMs({ config, params });
+    api.logger.debug?.(
+      `skills.setup ${selector} (agent=${agentId}) started: script=${path.relative(skillDir, scriptPath)} timeoutMs=${timeoutMs}`,
     );
-  },
-});
+
+    // Intentionally runs a skill-declared local setup script. The method is
+    // registered with operator.admin scope, setup.script is constrained to the
+    // resolved skill directory, and no completion state is stored, so setup
+    // scripts must be safe to rerun.
+    const result = await runPluginCommandWithTimeout({
+      argv: ["bash", scriptPath],
+      cwd: skillDir,
+      env: buildSetupEnv({
+        configEnv: readSkillConfigEnv(config, skillKey),
+        overlayEnv: normalizeEnvMap(params?.env),
+        skillDir,
+      }),
+      timeoutMs,
+    });
+    api.logger.debug?.(
+      `skills.setup ${selector} (agent=${agentId}) completed: code=${result.code} durationMs=${Date.now() - startedAt}`,
+    );
+    respond(true, result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "skill setup failed";
+    // INVALID_REQUEST when the caller-supplied slug doesn't resolve to an
+    // installed skill on this agent — no generic NOT_FOUND code at v2026.5.5
+    // (see openclaw src/gateway/protocol/schema/error-codes.ts). Reserve
+    // UNAVAILABLE for transient / server-side execution failures.
+    const code = isInvalidRequestError(error)
+      ? ErrorCodes.INVALID_REQUEST
+      : ErrorCodes.UNAVAILABLE;
+    api.logger.warn(
+      `skills.setup ${selectorForLog} (agent=${agentIdForLog}) failed: ${message} durationMs=${Date.now() - startedAt}`,
+    );
+    respondError(respond, code, message);
+  }
+}
 
 // #endregion
