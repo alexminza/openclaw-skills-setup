@@ -1,7 +1,10 @@
 import { access, readFile, readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import JSON5 from "json5";
+import { ErrorCodes, errorShape } from "openclaw/plugin-sdk/gateway-runtime";
+import { resolvePluginConfigObject } from "openclaw/plugin-sdk/plugin-config-runtime";
 import { runPluginCommandWithTimeout } from "openclaw/plugin-sdk/run-command";
+import { extractErrorCode, isPathInside } from "openclaw/plugin-sdk/security-runtime";
 import YAML from "yaml";
 
 // Working plugin implementation for the proposed skill setup lifecycle:
@@ -21,132 +24,19 @@ import YAML from "yaml";
 // skill-local path resolution, or setup-mode env sanitization.
 // The underlying helpers live under src/agents/skills/* and src/infra/*, but the
 // published package's `exports` map limits plugin imports to ./plugin-sdk/*.
-// Until upstream ships public SDK contracts for them, this plugin copies the
-// pinned OpenClaw helpers that already exist internally and keeps only the setup
+// Until upstream ships public SDK contracts for them, this plugin keeps a small
+// local facade shaped like the expected SDK surface and keeps only the setup
 // lifecycle proposal behavior as plugin-specific code.
 // That makes the future migration mechanical: replace the copied helpers with
 // plugin-sdk imports once upstream exports them.
-// Upstream internals copied or adapted below:
+// Upstream internals copied, adapted, or locally mirrored below:
 // - https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/skills/local-loader.ts
 // - https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/skills/workspace.ts
 // - https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/skills/frontmatter.ts
 // - https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/skills/config.ts
 // - https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/skills/env-overrides.ts
 // - https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/sandbox/sanitize-env-vars.ts
-// - https://github.com/openclaw/openclaw/blob/v2026.5.5/src/markdown/frontmatter.ts
 // - https://github.com/openclaw/openclaw/blob/v2026.5.5/src/shared/frontmatter.ts
-
-// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Copied locally from:
-// https://github.com/openclaw/openclaw/blob/v2026.5.5/src/gateway/protocol/schema/error-codes.ts
-// OpenClaw v2026.5.5 exposes these through openclaw/plugin-sdk/gateway-runtime,
-// but extracted third-party plugins cannot resolve the openclaw package at
-// runtime in the current container/plugin-loader shape.
-const ErrorCodes = {
-  NOT_LINKED: "NOT_LINKED",
-  NOT_PAIRED: "NOT_PAIRED",
-  AGENT_TIMEOUT: "AGENT_TIMEOUT",
-  INVALID_REQUEST: "INVALID_REQUEST",
-  APPROVAL_NOT_FOUND: "APPROVAL_NOT_FOUND",
-  UNAVAILABLE: "UNAVAILABLE",
-} as const;
-
-type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];
-
-function errorShape(code: ErrorCode, message: string, opts?: Record<string, unknown>) {
-  return {
-    code,
-    message,
-    ...opts,
-  };
-}
-
-// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Copied locally from:
-// https://github.com/openclaw/openclaw/blob/v2026.5.5/src/infra/errors.ts
-// Replace with openclaw/plugin-sdk/security-runtime once OpenClaw makes that
-// import resolvable for extracted third-party plugins.
-function extractErrorCode(err: unknown): string | undefined {
-  if (!err || typeof err !== "object") return;
-  const code = (err as { code?: unknown }).code;
-  if (typeof code === "string") return code;
-  if (typeof code === "number") return String(code);
-}
-
-// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Copied locally from:
-// https://github.com/openclaw/openclaw/blob/v2026.5.5/src/infra/path-guards.ts
-// Adaptation: inline the lowercase normalization used by the bundled upstream
-// helper so the copied function stays self-contained.
-// Replace with openclaw/plugin-sdk/security-runtime once OpenClaw makes that
-// import resolvable for extracted third-party plugins.
-const PARENT_SEGMENT_PREFIX = /^\.\.(?:[\\/]|$)/u;
-const POSIX_SEPARATOR_CHAR_CODE = 47;
-
-function normalizeWindowsPathForComparison(input: string): string {
-  let normalized = path.win32.normalize(input);
-  if (normalized.startsWith("\\\\?\\")) {
-    normalized = normalized.slice(4);
-    if (normalized.toUpperCase().startsWith("UNC\\")) normalized = `\\\\${normalized.slice(4)}`;
-  }
-  return normalized.replaceAll("/", "\\").toLowerCase();
-}
-
-function isPathInside(root: string, target: string): boolean {
-  if (process.platform === "win32") {
-    const rootForCompare = normalizeWindowsPathForComparison(path.win32.resolve(root));
-    const targetForCompare = normalizeWindowsPathForComparison(path.win32.resolve(target));
-    const relative = path.win32.relative(rootForCompare, targetForCompare);
-    return relative === "" || (!PARENT_SEGMENT_PREFIX.test(relative) && !path.win32.isAbsolute(relative));
-  }
-  if (
-    root.length > 0 &&
-    root.charCodeAt(0) === POSIX_SEPARATOR_CHAR_CODE &&
-    target.length >= root.length &&
-    target.charCodeAt(0) === POSIX_SEPARATOR_CHAR_CODE &&
-    !target.includes("/..") &&
-    (target === root || (target.startsWith(root) && target.charCodeAt(root.length) === POSIX_SEPARATOR_CHAR_CODE))
-  ) {
-    return true;
-  }
-  const resolvedRoot = path.resolve(root);
-  const resolvedTarget = path.resolve(target);
-  const relative = path.relative(resolvedRoot, resolvedTarget);
-  return relative === "" || (!PARENT_SEGMENT_PREFIX.test(relative) && !path.isAbsolute(relative));
-}
-
-// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Copied locally from:
-// https://github.com/openclaw/openclaw/blob/v2026.5.5/src/plugin-sdk/plugin-config-runtime.ts
-// Adaptation: keep the same traversal semantics with local unknown-safe
-// TypeScript narrowing so this plugin does not import OpenClaw at runtime.
-// Replace with openclaw/plugin-sdk/plugin-config-runtime once OpenClaw makes
-// that import resolvable for extracted third-party plugins.
-function resolvePluginConfigObject(config: unknown, pluginId: string): Record<string, unknown> | undefined {
-  const plugins =
-    config &&
-    typeof config === "object" &&
-    "plugins" in config &&
-    config.plugins &&
-    typeof config.plugins === "object" &&
-    !Array.isArray(config.plugins)
-      ? config.plugins
-      : undefined;
-  const entries =
-    plugins &&
-    "entries" in plugins &&
-    plugins.entries &&
-    typeof plugins.entries === "object" &&
-    !Array.isArray(plugins.entries)
-      ? plugins.entries
-      : undefined;
-  const entry = entries?.[pluginId as keyof typeof entries];
-  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return;
-  const pluginConfig = (entry as { config?: unknown }).config;
-  return pluginConfig && typeof pluginConfig === "object" && !Array.isArray(pluginConfig)
-    ? (pluginConfig as Record<string, unknown>)
-    : undefined;
-}
 
 const PLUGIN_ID = "skills-setup";
 const DEFAULT_AGENT_ID = "main";
@@ -421,193 +311,28 @@ async function resolveInstalledSkillDir({
 
 // #endregion
 
-// #region Copied OpenClaw frontmatter helpers
+// #region Local installed-skill SDK facade
 
 // OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Copied from OpenClaw v2026.5.5 because `parseFrontmatterBlock()` is not
-// exported through `openclaw/plugin-sdk/*`.
-// Upstream source:
-// https://github.com/openclaw/openclaw/blob/v2026.5.5/src/markdown/frontmatter.ts
-// Delete this block when OpenClaw exports the frontmatter parser to plugins.
+// Local facade for the installed-skill SDK surface requested upstream.
+// OpenClaw v2026.5.5 does not expose SKILL.md/frontmatter parsing or structured
+// `metadata.openclaw` access to plugins.
+// This local facade uses the same parser classes OpenClaw core uses for
+// frontmatter and JSON-shaped manifest blocks, but keeps them as direct plugin
+// dependencies until OpenClaw exports this capability through plugin-sdk.
+// Migration action: replace this region with OpenClaw's exported installed-skill
+// SDK helpers once they are available.
+// Related upstream sources:
+// https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/skills/frontmatter.ts
+// https://github.com/openclaw/openclaw/blob/v2026.5.5/src/shared/frontmatter.ts
 
-type ParsedFrontmatter = Record<string, string>;
+const MANIFEST_KEY = "openclaw";
+const LEGACY_MANIFEST_KEYS = ["clawdbot"] as const;
 
-type ParsedFrontmatterLineEntry = {
-  value: string;
-  kind: "inline" | "multiline";
-  rawInline: string;
-};
+type ParsedSkillFrontmatter = Record<string, unknown>;
 
-type ParsedYamlValue = {
-  value: string;
-  kind: "scalar" | "structured";
-};
-
-function stripQuotes(value: string): string {
-  if (
-    (value.startsWith('"') && value.endsWith('"')) ||
-    (value.startsWith("'") && value.endsWith("'"))
-  ) {
-    return value.slice(1, -1);
-  }
-  return value;
-}
-
-function coerceYamlFrontmatterValue(value: unknown): ParsedYamlValue | undefined {
-  if (value === null || value === undefined) {
-    return undefined;
-  }
-  if (typeof value === "string") {
-    return {
-      value: value.trim(),
-      kind: "scalar",
-    };
-  }
-  if (typeof value === "number" || typeof value === "boolean") {
-    return {
-      value: String(value),
-      kind: "scalar",
-    };
-  }
-  if (typeof value === "object") {
-    try {
-      return {
-        value: JSON.stringify(value),
-        kind: "structured",
-      };
-    } catch {
-      return undefined;
-    }
-  }
-  return undefined;
-}
-
-function parseYamlFrontmatter(block: string): Record<string, ParsedYamlValue> | null {
-  try {
-    const parsed = YAML.parse(block, { schema: "core" }) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return null;
-    }
-    const result: Record<string, ParsedYamlValue> = {};
-    for (const [rawKey, value] of Object.entries(parsed as Record<string, unknown>)) {
-      const key = rawKey.trim();
-      if (!key) {
-        continue;
-      }
-      const coerced = coerceYamlFrontmatterValue(value);
-      if (!coerced) {
-        continue;
-      }
-      result[key] = coerced;
-    }
-    return result;
-  } catch {
-    return null;
-  }
-}
-
-function extractMultiLineValue(
-  lines: string[],
-  startIndex: number,
-): {
-  value: string;
-  linesConsumed: number;
-} {
-  const valueLines: string[] = [];
-  let i = startIndex + 1;
-
-  while (i < lines.length) {
-    const line = lines[i];
-    if (line.length > 0 && !line.startsWith(" ") && !line.startsWith("\t")) {
-      break;
-    }
-    valueLines.push(line);
-    i += 1;
-  }
-
-  const combined = valueLines.join("\n").trim();
-  return { value: combined, linesConsumed: i - startIndex };
-}
-
-function parseLineFrontmatter(block: string): Record<string, ParsedFrontmatterLineEntry> {
-  const result: Record<string, ParsedFrontmatterLineEntry> = {};
-  const lines = block.split("\n");
-  let i = 0;
-
-  while (i < lines.length) {
-    const line = lines[i];
-    const match = line.match(/^([\w-]+):\s*(.*)$/);
-    if (!match) {
-      i += 1;
-      continue;
-    }
-
-    const key = match[1];
-    const inlineValue = match[2].trim();
-    if (!key) {
-      i += 1;
-      continue;
-    }
-
-    if (!inlineValue && i + 1 < lines.length) {
-      const nextLine = lines[i + 1];
-      if (nextLine.startsWith(" ") || nextLine.startsWith("\t")) {
-        const { value, linesConsumed } = extractMultiLineValue(lines, i);
-        if (value) {
-          result[key] = {
-            value,
-            kind: "multiline",
-            rawInline: inlineValue,
-          };
-        }
-        i += linesConsumed;
-        continue;
-      }
-    }
-
-    const value = stripQuotes(inlineValue);
-    if (value) {
-      result[key] = {
-        value,
-        kind: "inline",
-        rawInline: inlineValue,
-      };
-    }
-    i += 1;
-  }
-
-  return result;
-}
-
-function lineFrontmatterToPlain(
-  parsed: Record<string, ParsedFrontmatterLineEntry>,
-): ParsedFrontmatter {
-  const result: ParsedFrontmatter = {};
-  for (const [key, entry] of Object.entries(parsed)) {
-    result[key] = entry.value;
-  }
-  return result;
-}
-
-function isYamlBlockScalarIndicator(value: string): boolean {
-  return /^[|>][+-]?(\d+)?[+-]?$/.test(value);
-}
-
-function shouldPreferInlineLineValue(params: {
-  lineEntry: ParsedFrontmatterLineEntry;
-  yamlValue: ParsedYamlValue;
-}): boolean {
-  const { lineEntry, yamlValue } = params;
-  if (yamlValue.kind !== "structured") {
-    return false;
-  }
-  if (lineEntry.kind !== "inline") {
-    return false;
-  }
-  if (isYamlBlockScalarIndicator(lineEntry.rawInline)) {
-    return false;
-  }
-  return lineEntry.value.includes(":");
+function readStringValue(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
 }
 
 function extractFrontmatterBlock(content: string): string | undefined {
@@ -622,94 +347,41 @@ function extractFrontmatterBlock(content: string): string | undefined {
   return normalized.slice(4, endIndex);
 }
 
-function parseFrontmatterBlock(content: string): ParsedFrontmatter {
+function parseSkillFrontmatter(content: string): ParsedSkillFrontmatter {
   const block = extractFrontmatterBlock(content);
   if (!block) {
     return {};
   }
-
-  const lineParsed = parseLineFrontmatter(block);
-  const yamlParsed = parseYamlFrontmatter(block);
-  if (yamlParsed === null) {
-    return lineFrontmatterToPlain(lineParsed);
-  }
-
-  const merged: ParsedFrontmatter = {};
-  for (const [key, yamlValue] of Object.entries(yamlParsed)) {
-    merged[key] = yamlValue.value;
-    const lineEntry = lineParsed[key];
-    if (!lineEntry) {
-      continue;
-    }
-    if (shouldPreferInlineLineValue({ lineEntry, yamlValue })) {
-      merged[key] = lineEntry.value;
-    }
-  }
-
-  for (const [key, lineEntry] of Object.entries(lineParsed)) {
-    if (!(key in merged)) {
-      merged[key] = lineEntry.value;
-    }
-  }
-
-  return merged;
-}
-
-function parseFrontmatter(content: string): ParsedFrontmatter {
-  return parseFrontmatterBlock(content);
-}
-
-// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Adapted from OpenClaw v2026.5.5 because `resolveOpenClawManifestBlock()` is
-// not exported through `openclaw/plugin-sdk/*`.
-// Upstream source:
-// https://github.com/openclaw/openclaw/blob/v2026.5.5/src/shared/frontmatter.ts
-// The local constants mirror OpenClaw's manifest-key constants from:
-// https://github.com/openclaw/openclaw/blob/v2026.5.5/src/compat/legacy-names.ts
-// Migration action when https://github.com/openclaw/openclaw/issues/81913 lands:
-// import the exported manifest resolver and delete this adapted resolver plus
-// the local manifest-key and string-coercion helpers below.
-
-const MANIFEST_KEY = "openclaw";
-const LEGACY_MANIFEST_KEYS = ["clawdbot"] as const;
-
-function readStringValue(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
-}
-
-function getFrontmatterString(
-  frontmatter: Record<string, unknown>,
-  key: string,
-): string | undefined {
-  return readStringValue(frontmatter[key]);
-}
-
-function resolveOpenClawManifestBlock(params: {
-  frontmatter: Record<string, unknown>;
-  key?: string;
-}): Record<string, unknown> | undefined {
-  const raw = getFrontmatterString(params.frontmatter, params.key ?? "metadata");
-  if (!raw) {
-    return undefined;
-  }
-
+  let parsed: unknown;
   try {
-    const parsed = JSON5.parse(raw);
-    if (!parsed || typeof parsed !== "object") {
+    parsed = YAML.parse(block, { schema: "core" }) as unknown;
+  } catch {
+    return {};
+  }
+  return isRecord(parsed) ? parsed : {};
+}
+
+function resolveOpenClawManifestBlock(
+  frontmatter: ParsedSkillFrontmatter,
+): Record<string, unknown> | undefined {
+  let metadata = frontmatter.metadata;
+  if (typeof metadata === "string") {
+    try {
+      metadata = JSON5.parse(metadata) as unknown;
+    } catch {
       return undefined;
     }
-
-    const manifestKeys = [MANIFEST_KEY, ...LEGACY_MANIFEST_KEYS];
-    for (const key of manifestKeys) {
-      const candidate = (parsed as Record<string, unknown>)[key];
-      if (candidate && typeof candidate === "object") {
-        return candidate as Record<string, unknown>;
-      }
-    }
-    return undefined;
-  } catch {
+  }
+  if (!isRecord(metadata)) {
     return undefined;
   }
+  for (const manifestKey of [MANIFEST_KEY, ...LEGACY_MANIFEST_KEYS]) {
+    const manifestBlock = metadata[manifestKey];
+    if (isRecord(manifestBlock)) {
+      return manifestBlock;
+    }
+  }
+  return undefined;
 }
 
 // #endregion
@@ -719,9 +391,9 @@ function resolveOpenClawManifestBlock(params: {
 // Plugin-specific proposal surface:
 // https://github.com/openclaw/openclaw/issues/80213
 // OpenClaw v2026.5.5 has no setup lifecycle metadata contract.
-// This resolver intentionally uses the copied OpenClaw manifest parser above,
-// but the `setup.script` projection remains local until upstream exposes an
-// official setup metadata contract.
+// This resolver uses the local installed-skill SDK facade above, but the
+// `setup.script` projection remains local until upstream exposes an official
+// setup metadata contract.
 // Migration action when https://github.com/openclaw/openclaw/issues/80213 lands:
 // replace this region with the official setup metadata contract/resolver.
 
@@ -741,7 +413,7 @@ function resolveSetupMetadataFromOpenClawManifest(
 }
 
 function parseSetupMetadataFromSkillMarkdown(markdown: string): SetupMetadata | undefined {
-  const metadataObj = resolveOpenClawManifestBlock({ frontmatter: parseFrontmatter(markdown) });
+  const metadataObj = resolveOpenClawManifestBlock(parseSkillFrontmatter(markdown));
   if (!metadataObj) {
     return undefined;
   }

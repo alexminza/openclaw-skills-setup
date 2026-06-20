@@ -351,6 +351,48 @@ metadata: # skill metadata
     });
   });
 
+  it("skips setup when frontmatter is malformed", async () => {
+    const workspaceDir = await makeTempDir();
+    await writeSkill({
+      workspaceDir,
+      relativeDir: "malformed-frontmatter",
+      frontmatter: `
+metadata: { openclaw: [ }
+`,
+    });
+    const { handler } = registerSkillsSetupPlugin({ workspaceDir, config: {} });
+
+    const respond = await callGatewayMethod({
+      handler,
+      config: {},
+      requestParams: { slug: "malformed-frontmatter" },
+    });
+
+    expect(commandMocks.runPluginCommandWithTimeout).not.toHaveBeenCalled();
+    expect(respond).toHaveBeenCalledWith(true, { code: 0, stdout: "", stderr: "" });
+  });
+
+  it("skips setup when metadata is plain text", async () => {
+    const workspaceDir = await makeTempDir();
+    await writeSkill({
+      workspaceDir,
+      relativeDir: "plain-metadata",
+      frontmatter: `
+metadata: A skill that does things
+`,
+    });
+    const { handler } = registerSkillsSetupPlugin({ workspaceDir, config: {} });
+
+    const respond = await callGatewayMethod({
+      handler,
+      config: {},
+      requestParams: { slug: "plain-metadata" },
+    });
+
+    expect(commandMocks.runPluginCommandWithTimeout).not.toHaveBeenCalled();
+    expect(respond).toHaveBeenCalledWith(true, { code: 0, stdout: "", stderr: "" });
+  });
+
   it("rejects ambiguous grouped basename selectors", async () => {
     const workspaceDir = await makeTempDir();
     await writeSkill({

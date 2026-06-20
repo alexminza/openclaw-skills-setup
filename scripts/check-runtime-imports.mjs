@@ -3,10 +3,18 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const importSpecifierStartPattern = String.raw`(?:\bfrom\s*|\bimport\s+|\bimport\s*\(\s*|\brequire\s*\(\s*)`;
+const optionalModuleSubpathPattern = "(?:\\/[^\"'`]*)?";
+
+function quotedImportSpecifierPattern(modulePattern) {
+  return new RegExp(`${importSpecifierStartPattern}(["'\`])${modulePattern}\\1`, "u");
+}
+
 const startupEntryPath = path.join(rootDir, "dist", "index.js");
 const startupSource = readFileSync(startupEntryPath, "utf8");
-const sdkRuntimeImportPattern =
-  /(?:\bfrom\s*["']|\bimport\s*\(\s*["']|\brequire\s*\(\s*["'])(?:openclaw|@openclaw)\/plugin-sdk(?:\/[^"']*)?["']/u;
+const sdkRuntimeImportPattern = quotedImportSpecifierPattern(
+  `(?:openclaw|@openclaw)\\/plugin-sdk${optionalModuleSubpathPattern}`,
+);
 
 if (sdkRuntimeImportPattern.test(startupSource)) {
   throw new Error(
@@ -16,15 +24,15 @@ if (sdkRuntimeImportPattern.test(startupSource)) {
 
 const implementationEntryPath = path.join(rootDir, "dist", "skills-setup.impl.js");
 const implementationSource = readFileSync(implementationEntryPath, "utf8");
-// Extracted plugins do not get a local node_modules install, and OpenClaw
-// 2026.5.5 does not make the global openclaw package resolvable from the
-// extracted plugin directory. The lazy implementation must therefore be
-// self-contained for these runtime imports.
-const externalRuntimeImportPattern =
-  /(?:\bfrom\s*["']|\bimport\s*\(\s*["']|\brequire\s*\(\s*["'])(?:json5|yaml|openclaw(?:\/[^"']*)?)["']/u;
+// OpenClaw SDK imports are intentionally host-provided peer imports.
+// Parser libraries are direct plugin dependencies and must stay external so the
+// plugin package manager can provision them normally.
+const forbiddenRuntimeImportPattern = quotedImportSpecifierPattern(
+  `(?:(?:node:)?child_process|openclaw\\/(?:dist|node_modules)${optionalModuleSubpathPattern})`,
+);
 
-if (externalRuntimeImportPattern.test(implementationSource)) {
+if (forbiddenRuntimeImportPattern.test(implementationSource)) {
   throw new Error(
-    "dist/skills-setup.impl.js must bundle json5/yaml/openclaw SDK helpers; extracted OpenClaw plugins are not installed with node_modules.",
+    "dist/skills-setup.impl.js must not import child_process or unsupported OpenClaw deep paths.",
   );
 }
