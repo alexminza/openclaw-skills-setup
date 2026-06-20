@@ -19,6 +19,31 @@ Unlike a future core install/update hook, this plugin does not run setup scripts
 automatically. A caller with `operator.admin` scope must invoke `skills.setup`
 for a specific installed skill.
 
+## Project Decisions
+
+This plugin exists because the setup lifecycle in
+[openclaw/openclaw#80213](https://github.com/openclaw/openclaw/issues/80213) is
+not yet available in OpenClaw core. It provides an immediate, explicit
+`operator.admin` RPC and a working reference implementation for the proposed
+core mechanism.
+
+The implementation also documents a plugin SDK gap tracked in
+[openclaw/openclaw#81913](https://github.com/openclaw/openclaw/issues/81913).
+At OpenClaw 2026.5.5, third-party plugins do not have a stable public SDK
+surface for installed-skill discovery, SKILL.md/frontmatter parsing, structured
+`metadata.openclaw` access, skill env config lookup, skill-local path
+validation, or setup-mode env sanitization. Where possible, this plugin copies
+the pinned OpenClaw behavior locally instead of inventing unrelated semantics,
+so migration to future public SDK exports is mechanical.
+
+The published runtime is also bundled intentionally. ClawHub/OpenClaw extracts
+plugin packages into a plugin directory and does not run `npm install` there, so
+runtime dependencies such as `json5` and `yaml` must be included in the
+published artifact. OpenClaw 2026.5.5 also does not make
+`openclaw/plugin-sdk/*` reliably resolvable from an extracted plugin directory.
+The startup entrypoint remains small and lazy; the larger implementation is
+loaded only when `skills.setup` is invoked.
+
 ## Skill Metadata
 
 Add setup metadata to the skill's `SKILL.md` frontmatter:

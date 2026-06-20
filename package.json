@@ -13,7 +13,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && npm run check:runtime-imports",
+    "build": "tsc -p tsconfig.json && node scripts/bundle-runtime.mjs && npm run check:runtime-imports",
     "check:runtime-imports": "node scripts/check-runtime-imports.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
     "prepack": "npm run build",
@@ -27,6 +27,7 @@
     "openclaw": ">=2026.5.5"
   },
   "devDependencies": {
+    "esbuild": "^0.27.7",
     "openclaw": "2026.5.5",
     "typescript": "^5.8.3",
     "vitest": "^3.1.4"

@@ -21,6 +21,30 @@ development dependency and replace the local parser/resolver/sanitizer code
 with public SDK imports where the exported contracts fit this plugin's setup
 workflow.
 
+## Runtime packaging
+
+ClawHub/OpenClaw extracts plugin packages into a plugin directory; it does not
+run `npm install` inside that extracted directory. Runtime dependencies such as
+`json5` and `yaml` therefore must be bundled into the published runtime files.
+
+At OpenClaw 2026.5.5, extracted third-party plugins also cannot resolve the
+global `openclaw` package by bare specifier from their plugin directory. Keep the
+startup entrypoint (`dist/index.js`) small and lazy, and bundle the lazy
+implementation (`dist/skills-setup.impl.js`) so invocation-time dependencies are
+self-contained.
+
+`npm run build` owns this shape:
+
+- `tsc` emits declarations and JavaScript into `dist/`
+- `scripts/bundle-runtime.mjs` replaces `dist/skills-setup.impl.js` with a
+  bundled ESM artifact
+- `scripts/check-runtime-imports.mjs` prevents bare runtime imports that would
+  fail after extraction
+
+Do not remove the bundling step unless OpenClaw documents and verifies that
+extracted third-party plugins can resolve both package dependencies and
+`openclaw/plugin-sdk/*` at runtime.
+
 ## Release
 
 Publish ClawHub releases from immutable version tags. The package version in

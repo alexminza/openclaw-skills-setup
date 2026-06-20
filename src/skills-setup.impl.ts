@@ -1,10 +1,7 @@
 import { access, readFile, readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import JSON5 from "json5";
-import { ErrorCodes, errorShape } from "openclaw/plugin-sdk/gateway-runtime";
-import { resolvePluginConfigObject } from "openclaw/plugin-sdk/plugin-config-runtime";
 import { runPluginCommandWithTimeout } from "openclaw/plugin-sdk/run-command";
-import { extractErrorCode, isPathInside } from "openclaw/plugin-sdk/security-runtime";
 import YAML from "yaml";
 
 // Working plugin implementation for the proposed skill setup lifecycle:
@@ -38,6 +35,118 @@ import YAML from "yaml";
 // - https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/sandbox/sanitize-env-vars.ts
 // - https://github.com/openclaw/openclaw/blob/v2026.5.5/src/markdown/frontmatter.ts
 // - https://github.com/openclaw/openclaw/blob/v2026.5.5/src/shared/frontmatter.ts
+
+// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
+// Copied locally from:
+// https://github.com/openclaw/openclaw/blob/v2026.5.5/src/gateway/protocol/schema/error-codes.ts
+// OpenClaw v2026.5.5 exposes these through openclaw/plugin-sdk/gateway-runtime,
+// but extracted third-party plugins cannot resolve the openclaw package at
+// runtime in the current container/plugin-loader shape.
+const ErrorCodes = {
+  NOT_LINKED: "NOT_LINKED",
+  NOT_PAIRED: "NOT_PAIRED",
+  AGENT_TIMEOUT: "AGENT_TIMEOUT",
+  INVALID_REQUEST: "INVALID_REQUEST",
+  APPROVAL_NOT_FOUND: "APPROVAL_NOT_FOUND",
+  UNAVAILABLE: "UNAVAILABLE",
+} as const;
+
+type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];
+
+function errorShape(code: ErrorCode, message: string, opts?: Record<string, unknown>) {
+  return {
+    code,
+    message,
+    ...opts,
+  };
+}
+
+// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
+// Copied locally from:
+// https://github.com/openclaw/openclaw/blob/v2026.5.5/src/infra/errors.ts
+// Replace with openclaw/plugin-sdk/security-runtime once OpenClaw makes that
+// import resolvable for extracted third-party plugins.
+function extractErrorCode(err: unknown): string | undefined {
+  if (!err || typeof err !== "object") return;
+  const code = (err as { code?: unknown }).code;
+  if (typeof code === "string") return code;
+  if (typeof code === "number") return String(code);
+}
+
+// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
+// Copied locally from:
+// https://github.com/openclaw/openclaw/blob/v2026.5.5/src/infra/path-guards.ts
+// Adaptation: inline the lowercase normalization used by the bundled upstream
+// helper so the copied function stays self-contained.
+// Replace with openclaw/plugin-sdk/security-runtime once OpenClaw makes that
+// import resolvable for extracted third-party plugins.
+const PARENT_SEGMENT_PREFIX = /^\.\.(?:[\\/]|$)/u;
+const POSIX_SEPARATOR_CHAR_CODE = 47;
+
+function normalizeWindowsPathForComparison(input: string): string {
+  let normalized = path.win32.normalize(input);
+  if (normalized.startsWith("\\\\?\\")) {
+    normalized = normalized.slice(4);
+    if (normalized.toUpperCase().startsWith("UNC\\")) normalized = `\\\\${normalized.slice(4)}`;
+  }
+  return normalized.replaceAll("/", "\\").toLowerCase();
+}
+
+function isPathInside(root: string, target: string): boolean {
+  if (process.platform === "win32") {
+    const rootForCompare = normalizeWindowsPathForComparison(path.win32.resolve(root));
+    const targetForCompare = normalizeWindowsPathForComparison(path.win32.resolve(target));
+    const relative = path.win32.relative(rootForCompare, targetForCompare);
+    return relative === "" || (!PARENT_SEGMENT_PREFIX.test(relative) && !path.win32.isAbsolute(relative));
+  }
+  if (
+    root.length > 0 &&
+    root.charCodeAt(0) === POSIX_SEPARATOR_CHAR_CODE &&
+    target.length >= root.length &&
+    target.charCodeAt(0) === POSIX_SEPARATOR_CHAR_CODE &&
+    !target.includes("/..") &&
+    (target === root || (target.startsWith(root) && target.charCodeAt(root.length) === POSIX_SEPARATOR_CHAR_CODE))
+  ) {
+    return true;
+  }
+  const resolvedRoot = path.resolve(root);
+  const resolvedTarget = path.resolve(target);
+  const relative = path.relative(resolvedRoot, resolvedTarget);
+  return relative === "" || (!PARENT_SEGMENT_PREFIX.test(relative) && !path.isAbsolute(relative));
+}
+
+// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
+// Copied locally from:
+// https://github.com/openclaw/openclaw/blob/v2026.5.5/src/plugin-sdk/plugin-config-runtime.ts
+// Adaptation: keep the same traversal semantics with local unknown-safe
+// TypeScript narrowing so this plugin does not import OpenClaw at runtime.
+// Replace with openclaw/plugin-sdk/plugin-config-runtime once OpenClaw makes
+// that import resolvable for extracted third-party plugins.
+function resolvePluginConfigObject(config: unknown, pluginId: string): Record<string, unknown> | undefined {
+  const plugins =
+    config &&
+    typeof config === "object" &&
+    "plugins" in config &&
+    config.plugins &&
+    typeof config.plugins === "object" &&
+    !Array.isArray(config.plugins)
+      ? config.plugins
+      : undefined;
+  const entries =
+    plugins &&
+    "entries" in plugins &&
+    plugins.entries &&
+    typeof plugins.entries === "object" &&
+    !Array.isArray(plugins.entries)
+      ? plugins.entries
+      : undefined;
+  const entry = entries?.[pluginId as keyof typeof entries];
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return;
+  const pluginConfig = (entry as { config?: unknown }).config;
+  return pluginConfig && typeof pluginConfig === "object" && !Array.isArray(pluginConfig)
+    ? (pluginConfig as Record<string, unknown>)
+    : undefined;
+}
 
 const PLUGIN_ID = "skills-setup";
 const DEFAULT_AGENT_ID = "main";
