@@ -16,15 +16,13 @@ if (sdkRuntimeImportPattern.test(startupSource)) {
 
 const implementationEntryPath = path.join(rootDir, "dist", "skills-setup.impl.js");
 const implementationSource = readFileSync(implementationEntryPath, "utf8");
-// Extracted plugins do not get a local node_modules install, and OpenClaw
-// 2026.5.5 does not make the global openclaw package resolvable from the
-// extracted plugin directory. The lazy implementation must therefore be
-// self-contained for these runtime imports.
+// Parser dependencies must stay bundled because extracted plugins do not run
+// npm install. OpenClaw SDK imports are intentionally host-provided peer imports.
 const externalRuntimeImportPattern =
-  /(?:\bfrom\s*["']|\bimport\s*\(\s*["']|\brequire\s*\(\s*["'])(?:json5|yaml|openclaw(?:\/[^"']*)?)["']/u;
+  /(?:\bfrom\s*["']|\bimport\s*\(\s*["']|\brequire\s*\(\s*["'])(?:json5|yaml)["']/u;
 
 if (externalRuntimeImportPattern.test(implementationSource)) {
   throw new Error(
-    "dist/skills-setup.impl.js must bundle json5/yaml/openclaw SDK helpers; extracted OpenClaw plugins are not installed with node_modules.",
+    "dist/skills-setup.impl.js must bundle json5/yaml; extracted OpenClaw plugins are not installed with node_modules.",
   );
 }
