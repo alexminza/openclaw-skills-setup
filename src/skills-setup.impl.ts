@@ -1,9 +1,11 @@
 import { access, readFile, readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
+import JSON5 from "json5";
 import { ErrorCodes, errorShape } from "openclaw/plugin-sdk/gateway-runtime";
 import { resolvePluginConfigObject } from "openclaw/plugin-sdk/plugin-config-runtime";
 import { runPluginCommandWithTimeout } from "openclaw/plugin-sdk/run-command";
 import { extractErrorCode, isPathInside } from "openclaw/plugin-sdk/security-runtime";
+import YAML from "yaml";
 
 // Working plugin implementation for the proposed skill setup lifecycle:
 // https://github.com/openclaw/openclaw/issues/80213
@@ -22,13 +24,12 @@ import { extractErrorCode, isPathInside } from "openclaw/plugin-sdk/security-run
 // skill-local path resolution, or setup-mode env sanitization.
 // The underlying helpers live under src/agents/skills/* and src/infra/*, but the
 // published package's `exports` map limits plugin imports to ./plugin-sdk/*.
-// Until upstream ships public SDK contracts for them, this plugin resolves skill
-// directories, parses frontmatter, validates setup paths, reads skill env config,
-// and sanitizes setup env overlays directly.
-// The helpers below are plugin-owned reimplementations of the subset this plugin
-// needs; they are not verbatim copies of OpenClaw internals and do not assert
-// byte-for-byte parity.
-// Upstream internals modeled by these reimplementations:
+// Until upstream ships public SDK contracts for them, this plugin copies the
+// pinned OpenClaw helpers that already exist internally and keeps only the setup
+// lifecycle proposal behavior as plugin-specific code.
+// That makes the future migration mechanical: replace the copied helpers with
+// plugin-sdk imports once upstream exports them.
+// Upstream internals copied or adapted below:
 // - https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/skills/local-loader.ts
 // - https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/skills/workspace.ts
 // - https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/skills/frontmatter.ts
@@ -44,14 +45,14 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
 const MIN_TIMEOUT_MS = 1_000;
 // OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Plugin-owned reimplementation for valid skill-key segments.
-// OpenClaw does not currently export an installed-skill resolver that owns
-// basename/group matching.
+// Plugin-specific selector policy for this temporary RPC.
+// OpenClaw v2026.5.5 does not export an installed-skill resolver that accepts a
+// caller selector and returns one installed skill directory.
 const VALID_SKILL_KEY_SEGMENT_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
 // OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Plugin-owned reimplementation for setup-env filtering.
+// Plugin-specific setup-env filtering policy.
 // OpenClaw does not currently export a setup-env sanitizer, and the generic
-// sandbox sanitizer is too broad for trusted setup credentials.
+// sandbox sanitizer intentionally blocks credential keys that setup scripts need.
 const RESERVED_ENV_KEYS = new Set([
   "BASHOPTS",
   "BASH_ENV",
@@ -71,7 +72,7 @@ const RESERVED_ENV_KEYS = new Set([
 ]);
 const RESERVED_ENV_PREFIXES = ["BASH_FUNC_", "DYLD_", "LD_"];
 // OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Plugin-owned reimplementation for inherited-env filtering.
+// Plugin-specific inherited-env filtering policy.
 // OpenClaw does not currently export setup-mode inherited-env policy.
 const BLOCKED_INHERITED_ENV_KEYS = new Set([
   "BASHOPTS",
@@ -87,16 +88,16 @@ const BLOCKED_INHERITED_ENV_KEYS = new Set([
 
 type EnvMap = Record<string, string>;
 
-// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Plugin-owned setup metadata shape.
+// Plugin-specific proposal type:
+// https://github.com/openclaw/openclaw/issues/80213
 // OpenClaw does not currently export plugin-facing skill setup metadata types.
 type SetupMetadata = {
   script?: string;
   skillKey?: string;
 };
 
-// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Plugin-owned setup-script resolution shape.
+// Plugin-specific proposal type:
+// https://github.com/openclaw/openclaw/issues/80213
 // OpenClaw does not currently export a plugin-facing setup-script resolution
 // result type.
 type SetupScriptResolution = {
@@ -135,9 +136,9 @@ function normalizeString(value: unknown): string {
 }
 
 // OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Plugin-owned reimplementation for selector normalization.
-// OpenClaw does not currently export an installed-skill resolver, so the plugin
-// must normalize skill selectors before filesystem resolution.
+// Plugin-specific selector normalization for this temporary RPC.
+// Replace it with the upstream installed-skill resolver once OpenClaw exports
+// one for plugins.
 function normalizeSkillSelector(value: unknown): string {
   const selector = normalizeString(value).toLowerCase();
   if (!selector || selector.includes("\\") || selector.includes("..")) {
@@ -161,9 +162,19 @@ function normalizeAgentId(value: unknown): string {
 
 // #region Installed skill path resolution
 
-// Upstream source modeled locally because it is not exported to plugins:
+// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
+// Adapted from OpenClaw v2026.5.5 local skill loading because the loader is not
+// exported through `openclaw/plugin-sdk/*`.
+// Upstream source:
 // https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/skills/local-loader.ts
 // https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/skills/workspace.ts
+// This is not copied verbatim: OpenClaw's loader builds a skill catalog, while
+// this RPC needs to resolve one caller-supplied selector to one installed skill
+// directory and support group-qualified selectors.
+// The path containment primitive itself is imported from the exported SDK.
+// Migration action when https://github.com/openclaw/openclaw/issues/81913 lands:
+// replace this region with the exported installed-skill directory resolver and
+// keep only the RPC-specific error mapping if the SDK does not provide one.
 
 const ERR_SKILL_NOT_FOUND = "SKILL_NOT_FOUND";
 const ERR_INVALID_REQUEST = "INVALID_REQUEST";
@@ -185,9 +196,12 @@ function isInvalidRequestError(error: unknown): boolean {
   return code === ERR_SKILL_NOT_FOUND || code === ERR_INVALID_REQUEST;
 }
 
-// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Plugin-owned reimplementation for realpath-safe skill directory candidates.
-// OpenClaw does not currently export this resolver to plugins.
+// Plugin-specific adaptation of OpenClaw's realpath-safe local skill loading.
+// Keep the same safety invariant: SKILL.md must resolve inside the resolved
+// skill directory, and the skill directory must resolve inside the skills root.
+// Migration action: delete this helper when the plugin SDK exposes the
+// installed-skill directory resolver requested in
+// https://github.com/openclaw/openclaw/issues/81913.
 async function resolveRealSkillDirCandidate({
   skillsDirReal,
   candidateDir,
@@ -230,10 +244,11 @@ async function resolveRealSkillDirCandidate({
   return candidateDirReal;
 }
 
-// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Plugin-owned reimplementation for installed-skill lookup.
-// OpenClaw does not currently export a resolver that handles direct and grouped
-// skill directories.
+// Plugin-specific installed-skill lookup for this temporary RPC.
+// OpenClaw does not currently export a resolver that maps direct and grouped
+// skill selectors to a single installed skill directory.
+// Migration action: replace this helper with the exported resolver requested in
+// https://github.com/openclaw/openclaw/issues/81913.
 async function resolveInstalledSkillDir({
   workspaceDir,
   selector,
@@ -297,235 +312,331 @@ async function resolveInstalledSkillDir({
 
 // #endregion
 
-// #region SDK gap: setup script metadata parsing
+// #region Copied OpenClaw frontmatter helpers
 
 // OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// OpenClaw has internal SKILL.md frontmatter helpers, but they are not exported
-// through `openclaw/plugin-sdk/*` in openclaw@2026.5.5.
-// Upstream source modeled locally because it is not exported to plugins:
+// Copied from OpenClaw v2026.5.5 because `parseFrontmatterBlock()` is not
+// exported through `openclaw/plugin-sdk/*`.
+// Upstream source:
 // https://github.com/openclaw/openclaw/blob/v2026.5.5/src/markdown/frontmatter.ts
-// https://github.com/openclaw/openclaw/blob/v2026.5.5/src/shared/frontmatter.ts
-// https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/skills/frontmatter.ts
-// Candidate upstream surface: `parseFrontmatter()` + `resolveOpenClawMetadata()`
-// or a narrower `resolveSkillSetupScript()` helper.
-// If OpenClaw exposes that through the plugin SDK, this plugin-owned parser
-// group can be deleted.
+// Delete this block when OpenClaw exports the frontmatter parser to plugins.
 
-// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Plugin-owned reimplementation for scalar normalization.
-// Skill metadata helpers are not exported to plugins.
-function normalizeScalar(raw: string): string {
-  const value = raw.trim();
-  if (!value) {
-    return "";
-  }
-  if (value.startsWith("#")) {
-    return "";
-  }
+type ParsedFrontmatter = Record<string, string>;
+
+type ParsedFrontmatterLineEntry = {
+  value: string;
+  kind: "inline" | "multiline";
+  rawInline: string;
+};
+
+type ParsedYamlValue = {
+  value: string;
+  kind: "scalar" | "structured";
+};
+
+function stripQuotes(value: string): string {
   if (
     (value.startsWith('"') && value.endsWith('"')) ||
     (value.startsWith("'") && value.endsWith("'"))
   ) {
-    return value.slice(1, -1).trim();
-  }
-  const commentIndex = value.indexOf(" #");
-  return (commentIndex >= 0 ? value.slice(0, commentIndex) : value).trim();
-}
-
-// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Plugin-owned reimplementation for quote handling.
-// Frontmatter metadata parsing is not exported to plugins.
-function stripWrappingQuotes(raw: string): string {
-  const value = raw.trim();
-  if (
-    (value.startsWith('"') && value.endsWith('"')) ||
-    (value.startsWith("'") && value.endsWith("'"))
-  ) {
-    return value.slice(1, -1).trim();
+    return value.slice(1, -1);
   }
   return value;
 }
 
-// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Plugin-owned reimplementation for setup metadata precedence.
-// OpenClaw skill metadata precedence is not exported to plugins.
-function mergeSetupMetadata(...items: Array<Partial<SetupMetadata> | undefined>): SetupMetadata | undefined {
-  const merged: SetupMetadata = {};
-  for (const item of items) {
-    if (!isRecord(item)) {
-      continue;
-    }
-    if (typeof item.script === "string" && item.script) {
-      merged.script = item.script;
-    }
-    if (typeof item.skillKey === "string" && item.skillKey) {
-      merged.skillKey = item.skillKey;
-    }
-  }
-  return Object.keys(merged).length > 0 ? merged : undefined;
-}
-
-// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Plugin-owned reimplementation for metadata projection.
-// `resolveOpenClawMetadata()` is not exported to plugins.
-function readSetupMetadataFromObject(value: unknown): SetupMetadata | undefined {
-  if (!isRecord(value)) {
+function coerceYamlFrontmatterValue(value: unknown): ParsedYamlValue | undefined {
+  if (value === null || value === undefined) {
     return undefined;
   }
-  const openclaw = value.openclaw;
-  if (!isRecord(openclaw)) {
-    return undefined;
+  if (typeof value === "string") {
+    return {
+      value: value.trim(),
+      kind: "scalar",
+    };
   }
-  return mergeSetupMetadata({
-    script:
-      isRecord(openclaw.setup) && typeof openclaw.setup.script === "string"
-        ? openclaw.setup.script.trim()
-        : undefined,
-    skillKey: typeof openclaw.skillKey === "string" ? openclaw.skillKey.trim() : undefined,
-  });
-}
-
-// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Plugin-owned reimplementation for JSON-shaped SKILL.md `metadata` values.
-// No exported plugin SDK helper parses this shape.
-function parseSetupMetadataFromManifestText(raw: string): SetupMetadata | undefined {
-  const value = stripWrappingQuotes(raw);
-  if (!value) {
-    return undefined;
+  if (typeof value === "number" || typeof value === "boolean") {
+    return {
+      value: String(value),
+      kind: "scalar",
+    };
   }
-  try {
-    const parsed = JSON.parse(value);
-    const metadata = readSetupMetadataFromObject(parsed);
-    if (metadata) {
-      return metadata;
+  if (typeof value === "object") {
+    try {
+      return {
+        value: JSON.stringify(value),
+        kind: "structured",
+      };
+    } catch {
+      return undefined;
     }
-  } catch {
-    // Existing skill metadata is JSON-shaped but historically parsed as JSON5.
-  }
-
-  const openclawMatch = /(?:^|[,{]\s*)["']?openclaw["']?\s*:/u.exec(value);
-  if (!openclawMatch) {
-    return undefined;
-  }
-  const openclawText = value.slice(openclawMatch.index);
-  const scriptMatch =
-    /(?:^|[,{]\s*)["']?setup["']?\s*:\s*\{[\s\S]*?["']?script["']?\s*:\s*(?:"([^"]+)"|'([^']+)'|([^\s,}]+))/u.exec(
-      openclawText,
-    );
-  const skillKeyMatch =
-    /(?:^|[,{]\s*)["']?skillKey["']?\s*:\s*(?:"([^"]+)"|'([^']+)'|([^\s,}]+))/u.exec(
-      openclawText,
-    );
-  return mergeSetupMetadata({
-    script: scriptMatch
-      ? normalizeScalar(scriptMatch[1] ?? scriptMatch[2] ?? scriptMatch[3] ?? "")
-      : undefined,
-    skillKey: skillKeyMatch
-      ? normalizeScalar(skillKeyMatch[1] ?? skillKeyMatch[2] ?? skillKeyMatch[3] ?? "")
-      : undefined,
-  });
-}
-
-// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Plugin-owned reimplementation for SKILL.md frontmatter extraction.
-// No exported plugin SDK helper provides it.
-function extractFrontmatterBlock(markdown: string): string | undefined {
-  const lines = markdown.split(/\r?\n/);
-  if (lines[0]?.trim() !== "---") {
-    return undefined;
-  }
-  const endIndex = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
-  return endIndex > 0 ? lines.slice(1, endIndex).join("\n") : undefined;
-}
-
-// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Plugin-owned reimplementation for YAML/frontmatter parsing.
-// No exported plugin SDK helper provides it.
-function parseIndentedSetupMetadata(frontmatter: string): SetupMetadata | undefined {
-  const lines = frontmatter.split(/\r?\n/);
-  const stack: Array<{ indent: number; key: string }> = [];
-  const metadata: SetupMetadata = {};
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index] ?? "";
-    if (!line.trim() || line.trimStart().startsWith("#")) {
-      continue;
-    }
-    const match = /^(\s*)([A-Za-z0-9_-]+):(?:\s*(.*))?$/.exec(line);
-    if (!match) {
-      continue;
-    }
-    const indent = match[1].length;
-    const key = match[2];
-    const rawValue = match[3] ?? "";
-    while (stack.length > 0 && stack[stack.length - 1].indent >= indent) {
-      stack.pop();
-    }
-    const pathKeys = [...stack.map((entry) => entry.key), key];
-    const pathKey = pathKeys.join(".");
-    const normalizedValue = normalizeScalar(rawValue);
-    if (pathKey === "metadata.openclaw.setup.script" && normalizedValue) {
-      metadata.script = normalizedValue;
-    }
-    if (pathKey === "metadata.openclaw.skillKey" && normalizedValue) {
-      metadata.skillKey = normalizedValue;
-    }
-    if (!normalizedValue) {
-      stack.push({ indent, key });
-    }
-  }
-  return mergeSetupMetadata(metadata);
-}
-
-// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Plugin-owned reimplementation for frontmatter block-scalar detection.
-// No exported plugin SDK helper provides it.
-function isYamlBlockScalarIndicator(value: string): boolean {
-  return /^[|>][+-]?(\d+)?[+-]?$/u.test(value.trim());
-}
-
-// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Plugin-owned reimplementation for `metadata:` scalar and indented JSON-style
-// values.
-// No exported plugin SDK helper parses this shape.
-function parseMetadataValueSetupMetadata(frontmatter: string): SetupMetadata | undefined {
-  const lines = frontmatter.split(/\r?\n/);
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index] ?? "";
-    const match = /^metadata:(?:\s*(.*))?$/.exec(line);
-    if (!match) {
-      continue;
-    }
-    const rawValue = match[1] ?? "";
-    const normalizedValue = normalizeScalar(rawValue);
-    if (normalizedValue && !isYamlBlockScalarIndicator(normalizedValue)) {
-      return parseSetupMetadataFromManifestText(rawValue);
-    }
-
-    const valueLines: string[] = [];
-    for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
-      const nextLine = lines[cursor] ?? "";
-      if (nextLine.trim() && !nextLine.startsWith(" ") && !nextLine.startsWith("\t")) {
-        break;
-      }
-      valueLines.push(nextLine.trim());
-    }
-    return parseSetupMetadataFromManifestText(valueLines.join("\n"));
   }
   return undefined;
 }
 
-// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Plugin-owned reimplementation for SKILL.md setup metadata resolution.
-// No exported plugin SDK helper provides it.
-function parseSetupMetadataFromSkillMarkdown(markdown: string): SetupMetadata | undefined {
-  const frontmatter = extractFrontmatterBlock(markdown);
-  if (!frontmatter) {
+function parseYamlFrontmatter(block: string): Record<string, ParsedYamlValue> | null {
+  try {
+    const parsed = YAML.parse(block, { schema: "core" }) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    const result: Record<string, ParsedYamlValue> = {};
+    for (const [rawKey, value] of Object.entries(parsed as Record<string, unknown>)) {
+      const key = rawKey.trim();
+      if (!key) {
+        continue;
+      }
+      const coerced = coerceYamlFrontmatterValue(value);
+      if (!coerced) {
+        continue;
+      }
+      result[key] = coerced;
+    }
+    return result;
+  } catch {
+    return null;
+  }
+}
+
+function extractMultiLineValue(
+  lines: string[],
+  startIndex: number,
+): {
+  value: string;
+  linesConsumed: number;
+} {
+  const valueLines: string[] = [];
+  let i = startIndex + 1;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line.length > 0 && !line.startsWith(" ") && !line.startsWith("\t")) {
+      break;
+    }
+    valueLines.push(line);
+    i += 1;
+  }
+
+  const combined = valueLines.join("\n").trim();
+  return { value: combined, linesConsumed: i - startIndex };
+}
+
+function parseLineFrontmatter(block: string): Record<string, ParsedFrontmatterLineEntry> {
+  const result: Record<string, ParsedFrontmatterLineEntry> = {};
+  const lines = block.split("\n");
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    const match = line.match(/^([\w-]+):\s*(.*)$/);
+    if (!match) {
+      i += 1;
+      continue;
+    }
+
+    const key = match[1];
+    const inlineValue = match[2].trim();
+    if (!key) {
+      i += 1;
+      continue;
+    }
+
+    if (!inlineValue && i + 1 < lines.length) {
+      const nextLine = lines[i + 1];
+      if (nextLine.startsWith(" ") || nextLine.startsWith("\t")) {
+        const { value, linesConsumed } = extractMultiLineValue(lines, i);
+        if (value) {
+          result[key] = {
+            value,
+            kind: "multiline",
+            rawInline: inlineValue,
+          };
+        }
+        i += linesConsumed;
+        continue;
+      }
+    }
+
+    const value = stripQuotes(inlineValue);
+    if (value) {
+      result[key] = {
+        value,
+        kind: "inline",
+        rawInline: inlineValue,
+      };
+    }
+    i += 1;
+  }
+
+  return result;
+}
+
+function lineFrontmatterToPlain(
+  parsed: Record<string, ParsedFrontmatterLineEntry>,
+): ParsedFrontmatter {
+  const result: ParsedFrontmatter = {};
+  for (const [key, entry] of Object.entries(parsed)) {
+    result[key] = entry.value;
+  }
+  return result;
+}
+
+function isYamlBlockScalarIndicator(value: string): boolean {
+  return /^[|>][+-]?(\d+)?[+-]?$/.test(value);
+}
+
+function shouldPreferInlineLineValue(params: {
+  lineEntry: ParsedFrontmatterLineEntry;
+  yamlValue: ParsedYamlValue;
+}): boolean {
+  const { lineEntry, yamlValue } = params;
+  if (yamlValue.kind !== "structured") {
+    return false;
+  }
+  if (lineEntry.kind !== "inline") {
+    return false;
+  }
+  if (isYamlBlockScalarIndicator(lineEntry.rawInline)) {
+    return false;
+  }
+  return lineEntry.value.includes(":");
+}
+
+function extractFrontmatterBlock(content: string): string | undefined {
+  const normalized = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  if (!normalized.startsWith("---")) {
     return undefined;
   }
-  return mergeSetupMetadata(
-    parseMetadataValueSetupMetadata(frontmatter),
-    parseIndentedSetupMetadata(frontmatter),
-  );
+  const endIndex = normalized.indexOf("\n---", 3);
+  if (endIndex === -1) {
+    return undefined;
+  }
+  return normalized.slice(4, endIndex);
+}
+
+function parseFrontmatterBlock(content: string): ParsedFrontmatter {
+  const block = extractFrontmatterBlock(content);
+  if (!block) {
+    return {};
+  }
+
+  const lineParsed = parseLineFrontmatter(block);
+  const yamlParsed = parseYamlFrontmatter(block);
+  if (yamlParsed === null) {
+    return lineFrontmatterToPlain(lineParsed);
+  }
+
+  const merged: ParsedFrontmatter = {};
+  for (const [key, yamlValue] of Object.entries(yamlParsed)) {
+    merged[key] = yamlValue.value;
+    const lineEntry = lineParsed[key];
+    if (!lineEntry) {
+      continue;
+    }
+    if (shouldPreferInlineLineValue({ lineEntry, yamlValue })) {
+      merged[key] = lineEntry.value;
+    }
+  }
+
+  for (const [key, lineEntry] of Object.entries(lineParsed)) {
+    if (!(key in merged)) {
+      merged[key] = lineEntry.value;
+    }
+  }
+
+  return merged;
+}
+
+function parseFrontmatter(content: string): ParsedFrontmatter {
+  return parseFrontmatterBlock(content);
+}
+
+// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
+// Adapted from OpenClaw v2026.5.5 because `resolveOpenClawManifestBlock()` is
+// not exported through `openclaw/plugin-sdk/*`.
+// Upstream source:
+// https://github.com/openclaw/openclaw/blob/v2026.5.5/src/shared/frontmatter.ts
+// The local constants mirror OpenClaw's manifest-key constants from:
+// https://github.com/openclaw/openclaw/blob/v2026.5.5/src/compat/legacy-names.ts
+// Migration action when https://github.com/openclaw/openclaw/issues/81913 lands:
+// import the exported manifest resolver and delete this adapted resolver plus
+// the local manifest-key and string-coercion helpers below.
+
+const MANIFEST_KEY = "openclaw";
+const LEGACY_MANIFEST_KEYS = ["clawdbot"] as const;
+
+function readStringValue(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function getFrontmatterString(
+  frontmatter: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  return readStringValue(frontmatter[key]);
+}
+
+function resolveOpenClawManifestBlock(params: {
+  frontmatter: Record<string, unknown>;
+  key?: string;
+}): Record<string, unknown> | undefined {
+  const raw = getFrontmatterString(params.frontmatter, params.key ?? "metadata");
+  if (!raw) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON5.parse(raw);
+    if (!parsed || typeof parsed !== "object") {
+      return undefined;
+    }
+
+    const manifestKeys = [MANIFEST_KEY, ...LEGACY_MANIFEST_KEYS];
+    for (const key of manifestKeys) {
+      const candidate = (parsed as Record<string, unknown>)[key];
+      if (candidate && typeof candidate === "object") {
+        return candidate as Record<string, unknown>;
+      }
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// #endregion
+
+// #region Setup metadata proposal
+
+// Plugin-specific proposal surface:
+// https://github.com/openclaw/openclaw/issues/80213
+// OpenClaw v2026.5.5 has no setup lifecycle metadata contract.
+// This resolver intentionally uses the copied OpenClaw manifest parser above,
+// but the `setup.script` projection remains local until upstream exposes an
+// official setup metadata contract.
+// Migration action when https://github.com/openclaw/openclaw/issues/80213 lands:
+// replace this region with the official setup metadata contract/resolver.
+
+function resolveSetupMetadataFromOpenClawManifest(
+  metadataObj: Record<string, unknown>,
+): SetupMetadata | undefined {
+  const setup = isRecord(metadataObj.setup) ? metadataObj.setup : undefined;
+  const script = readStringValue(setup?.script)?.trim();
+  const skillKey = readStringValue(metadataObj.skillKey)?.trim();
+  if (!script && !skillKey) {
+    return undefined;
+  }
+  return {
+    ...(script ? { script } : {}),
+    ...(skillKey ? { skillKey } : {}),
+  };
+}
+
+function parseSetupMetadataFromSkillMarkdown(markdown: string): SetupMetadata | undefined {
+  const metadataObj = resolveOpenClawManifestBlock({ frontmatter: parseFrontmatter(markdown) });
+  if (!metadataObj) {
+    return undefined;
+  }
+  return resolveSetupMetadataFromOpenClawManifest(metadataObj);
 }
 
 // #endregion
@@ -539,13 +650,19 @@ function parseSetupMetadataFromSkillMarkdown(markdown: string): SetupMetadata | 
 // `resolveSkillSetupScriptPath(skillDir)` or composition from public
 // frontmatter helpers that reads the supported metadata shape and enforces the
 // same path boundary.
-// Upstream source modeled locally because it is not exported to plugins:
+// Upstream source used for the compatible pieces:
 // https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/skills/local-loader.ts
 // https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/skills/frontmatter.ts
 
-// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Plugin-owned reimplementation for setup script path resolution.
-// `resolveSkillSetupScriptPath()` is not exported to plugins.
+// Plugin-specific reimplementation:
+// https://github.com/openclaw/openclaw/issues/80213
+// OpenClaw v2026.5.5 has no setup script resolver because setup scripts are not
+// yet an upstream lifecycle feature.
+// This combines the copied frontmatter helpers above with the exported
+// `isPathInside()` SDK primitive.
+// Migration action when https://github.com/openclaw/openclaw/issues/80213 lands:
+// replace this helper with the official setup script resolver or remove the
+// explicit RPC if setup execution moves fully into OpenClaw install/update.
 async function resolveSetupScriptPath(skillDir: string): Promise<SetupScriptResolution | undefined> {
   const skillMarkdown = await readFile(path.join(skillDir, "SKILL.md"), "utf8");
   const metadata = parseSetupMetadataFromSkillMarkdown(skillMarkdown);
@@ -573,24 +690,62 @@ async function resolveSetupScriptPath(skillDir: string): Promise<SetupScriptReso
 // #region SDK gap: setup env overlay
 
 // OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// OpenClaw does not expose a setup-env sanitizer that allows operator-provided
-// credential vars while blocking only execution-context overrides.
-// The generic sandbox sanitizer blocks token-like keys, which is wrong for this
-// setup hook.
+// OpenClaw does not expose a setup-env sanitizer that allows explicit
+// setup-script credential vars while blocking only execution-context overrides.
+// The generic sandbox sanitizer intentionally blocks token-like keys, which is
+// wrong for this trusted setup hook.
 // Candidate upstream surface:
 // `sanitizeSetupEnvOverlay()` or a documented setup-mode option for the host env
 // sanitizer.
 // Allowed credential variables remain visible to the setup script.
 // Callers must pass them only to trusted skills and prefer narrowly scoped
 // secrets.
-// Upstream source modeled locally because it is not exported to plugins:
+// Upstream source used for the compatible copied/adapted pieces:
 // https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/skills/env-overrides.ts
 // https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/sandbox/sanitize-env-vars.ts
 // https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/skills/config.ts
+// Migration action when https://github.com/openclaw/openclaw/issues/81913 lands:
+// replace this region with the exported setup-env sanitizer/builder if it
+// preserves the setup-hook requirement to allow explicit credential vars.
+// If upstream instead owns setup execution through
+// https://github.com/openclaw/openclaw/issues/80213, delete this region with the
+// explicit RPC implementation.
+
+const BLOCKED_ENV_VALUE_WARNING = "Contains null bytes";
 
 // OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Plugin-owned reimplementation for setup-mode env-entry policy.
-// No exported plugin SDK helper provides it.
+// Copied from OpenClaw v2026.5.5 because `validateEnvVarValue()` is not
+// exported through `openclaw/plugin-sdk/*`.
+// Upstream source:
+// https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/sandbox/sanitize-env-vars.ts
+function validateEnvVarValue(value: string): string | undefined {
+  if (value.includes("\0")) {
+    return "Contains null bytes";
+  }
+  if (value.length > 32768) {
+    return "Value exceeds maximum length";
+  }
+  if (/^[A-Za-z0-9+/=]{80,}$/.test(value)) {
+    return "Value looks like base64-encoded credential data";
+  }
+  return undefined;
+}
+
+function isBlockedSetupEnvValue(value: string): boolean {
+  return (
+    validateEnvVarValue(value) === BLOCKED_ENV_VALUE_WARNING || /^\s*\(\)\s*\{/u.test(value)
+  );
+}
+
+// Plugin-specific reimplementation:
+// https://github.com/openclaw/openclaw/issues/80213
+// This setup hook must allow explicitly supplied credential keys, unlike
+// OpenClaw's generic sandbox env sanitizer.
+// It blocks shell/loader execution controls and inherited shell functions while
+// preserving setup credentials.
+// Migration action: replace with the exported setup-env policy requested in
+// https://github.com/openclaw/openclaw/issues/81913 once it supports setup
+// credentials.
 function isBlockedSetupEnvEntry(key: string, value: string): boolean {
   const upperKey = key.toUpperCase();
   if (RESERVED_ENV_KEYS.has(upperKey)) {
@@ -599,12 +754,17 @@ function isBlockedSetupEnvEntry(key: string, value: string): boolean {
   if (RESERVED_ENV_PREFIXES.some((prefix) => upperKey.startsWith(prefix))) {
     return true;
   }
-  return /^\s*\(\)\s*\{/u.test(value);
+  return isBlockedSetupEnvValue(value);
 }
 
-// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Plugin-owned reimplementation for setup-mode inherited-env policy.
-// No exported plugin SDK helper provides it.
+// Plugin-specific reimplementation:
+// https://github.com/openclaw/openclaw/issues/80213
+// Inherited env policy is narrower than caller-provided setup env policy so
+// common process env remains available while shell execution controls are
+// tombstoned before command invocation.
+// Migration action: replace with the exported setup-env policy requested in
+// https://github.com/openclaw/openclaw/issues/81913 once it defines inherited
+// env handling for setup commands.
 function isBlockedInheritedSetupEnvEntry(key: string, value: string): boolean {
   const upperKey = key.toUpperCase();
   if (BLOCKED_INHERITED_ENV_KEYS.has(upperKey)) {
@@ -613,12 +773,9 @@ function isBlockedInheritedSetupEnvEntry(key: string, value: string): boolean {
   if (RESERVED_ENV_PREFIXES.some((prefix) => upperKey.startsWith(prefix))) {
     return true;
   }
-  return /^\s*\(\)\s*\{/u.test(value);
+  return isBlockedSetupEnvValue(value);
 }
 
-// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Plugin-owned reimplementation for setup-mode inherited-env sanitization.
-// No exported plugin SDK helper provides it.
 function tombstoneBlockedInheritedSetupEnv(env: NodeJS.ProcessEnv): void {
   // runPluginCommandWithTimeout merges this object over process.env; undefined
   // tombstones are required to suppress unsafe inherited bash/loader controls.
@@ -633,9 +790,6 @@ function tombstoneBlockedInheritedSetupEnv(env: NodeJS.ProcessEnv): void {
   }
 }
 
-// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Plugin-owned reimplementation for setup-env overlay normalization.
-// No exported plugin SDK helper provides it.
 function normalizeEnvMap(value: unknown): EnvMap {
   const env: EnvMap = {};
   if (!isRecord(value)) {
@@ -655,23 +809,41 @@ function normalizeEnvMap(value: unknown): EnvMap {
 }
 
 // OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Plugin-owned reimplementation for setup env lookup.
-// No exported skill config resolver returns setup env for a skill key.
-function readSkillConfigEnv(config: unknown, skillKey: string): EnvMap {
+// Adapted from OpenClaw v2026.5.5 because `resolveSkillConfig()` is not
+// exported through `openclaw/plugin-sdk/*`.
+// Upstream source:
+// https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/skills/config.ts
+// The plugin uses `unknown` at the SDK boundary and projects only the `env`
+// field needed by setup scripts.
+// Migration action when https://github.com/openclaw/openclaw/issues/81913 lands:
+// import the exported `resolveSkillConfig()` and keep only the boundary
+// normalization needed by this plugin, if any.
+function resolveSkillConfig(config: unknown, skillKey: string): { env?: unknown } | undefined {
   if (!isRecord(config)) {
-    return {};
+    return undefined;
   }
   const skills = config.skills;
   if (!isRecord(skills) || !isRecord(skills.entries)) {
-    return {};
+    return undefined;
   }
   const entry = skills.entries[skillKey];
-  return isRecord(entry) ? normalizeEnvMap(entry.env) : {};
+  if (!entry || typeof entry !== "object") {
+    return undefined;
+  }
+  return entry as { env?: unknown };
 }
 
-// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Plugin-owned reimplementation for setup-env assembly.
-// No exported plugin SDK helper provides this builder/sanitizer behavior.
+function readSkillConfigEnv(config: unknown, skillKey: string): EnvMap {
+  return normalizeEnvMap(resolveSkillConfig(config, skillKey)?.env);
+}
+
+// Plugin-specific reimplementation:
+// https://github.com/openclaw/openclaw/issues/80213
+// Upstream has no setup command env builder yet.
+// Migration action: replace with the exported setup command env builder if
+// https://github.com/openclaw/openclaw/issues/81913 adds one, or delete this
+// helper if https://github.com/openclaw/openclaw/issues/80213 moves setup
+// execution into OpenClaw.
 function buildSetupEnv({
   configEnv,
   overlayEnv,
