@@ -1026,7 +1026,6 @@ export async function handleSkillsSetup({
   options: SkillsSetupHandlerOptions;
 }): Promise<void> {
   const { params, respond, context } = options;
-  const startedAt = Date.now();
   let selectorForLog = "?";
   let agentIdForLog = "?";
   try {
@@ -1034,9 +1033,21 @@ export async function handleSkillsSetup({
     const agentId = normalizeAgentId(params?.agentId);
     selectorForLog = selector;
     agentIdForLog = agentId;
+    api.logger.debug?.(
+      `skills.setup ${selector} (agent=${agentId}): reading runtime config`,
+    );
     const config = context.getRuntimeConfig();
+    api.logger.debug?.(
+      `skills.setup ${selector} (agent=${agentId}): locating agent workspace`,
+    );
     const workspaceDir = api.runtime.agent.resolveAgentWorkspaceDir(config, agentId);
+    api.logger.debug?.(
+      `skills.setup ${selector} (agent=${agentId}): resolving installed skill`,
+    );
     const skillDir = await resolveInstalledSkillDir({ workspaceDir, selector });
+    api.logger.debug?.(
+      `skills.setup ${selector} (agent=${agentId}): reading setup metadata`,
+    );
     const setupScript = await resolveSetupScriptPath(skillDir);
     if (!setupScript) {
       api.logger.debug?.(
@@ -1049,7 +1060,15 @@ export async function handleSkillsSetup({
     const { scriptPath, skillKey = selector } = setupScript;
     const timeoutMs = resolveTimeoutMs({ config, params });
     api.logger.debug?.(
-      `skills.setup ${selector} (agent=${agentId}) started: script=${path.relative(skillDir, scriptPath)} timeoutMs=${timeoutMs}`,
+      `skills.setup ${selector} (agent=${agentId}): preparing setup environment`,
+    );
+    const env = buildSetupEnv({
+      configEnv: readSkillConfigEnv(config, skillKey),
+      overlayEnv: normalizeEnvMap(params?.env),
+      skillDir,
+    });
+    api.logger.debug?.(
+      `skills.setup ${selector} (agent=${agentId}): running setup script ${path.relative(skillDir, scriptPath)} with timeoutMs=${timeoutMs}`,
     );
 
     // Temporary plugin lifecycle hook:
@@ -1059,15 +1078,11 @@ export async function handleSkillsSetup({
     const result = await runPluginCommandWithTimeout({
       argv: ["bash", scriptPath],
       cwd: skillDir,
-      env: buildSetupEnv({
-        configEnv: readSkillConfigEnv(config, skillKey),
-        overlayEnv: normalizeEnvMap(params?.env),
-        skillDir,
-      }),
+      env,
       timeoutMs,
     });
     api.logger.debug?.(
-      `skills.setup ${selector} (agent=${agentId}) completed: code=${result.code} durationMs=${Date.now() - startedAt}`,
+      `skills.setup ${selector} (agent=${agentId}) completed: code=${result.code}`,
     );
     respond(true, result);
   } catch (error) {
@@ -1080,7 +1095,7 @@ export async function handleSkillsSetup({
       ? ErrorCodes.INVALID_REQUEST
       : ErrorCodes.UNAVAILABLE;
     api.logger.warn(
-      `skills.setup ${selectorForLog} (agent=${agentIdForLog}) failed: ${message} durationMs=${Date.now() - startedAt}`,
+      `skills.setup ${selectorForLog} (agent=${agentIdForLog}) failed: ${message}`,
     );
     respondError(respond, code, message);
   }

@@ -22,6 +22,7 @@ export default {
     api.registerGatewayMethod(
       METHOD_NAME,
       async (options) => {
+        api.logger.debug?.("skills.setup: ensuring implementation is loaded");
         const { handleSkillsSetup } = await import("./skills-setup.impl.js");
         await handleSkillsSetup({ api, options });
       },
