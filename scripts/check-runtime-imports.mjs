@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const importSpecifierStartPattern = String.raw`(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*)`;
+const importSpecifierStartPattern = String.raw`(?:\bfrom\s*|\bimport\s+|\bimport\s*\(\s*|\brequire\s*\(\s*)`;
 const optionalModuleSubpathPattern = "(?:\\/[^\"'`]*)?";
 
 function quotedImportSpecifierPattern(modulePattern) {
