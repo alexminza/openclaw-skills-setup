@@ -50,49 +50,71 @@ extracted third-party plugins can resolve both package dependencies and
 Publish ClawHub releases from immutable version tags. The package version in
 `package.json` must match the Git tag without the `v` prefix.
 
+This package is published as `@alexminza/skills-setup`, so the ClawHub package
+owner must match the package scope. The publish script derives the owner from
+`package.json#name`, derives the source repository from
+`package.json#repository`, and passes the exact tag commit and source ref
+explicitly to match ClawHub's current package provenance checks.
+
 Use the VS Code tasks as the standard release workflow. They keep the checks and
 publish commands consistent across releases.
 
-Run `Release: Prepare` first. It performs the local release validation without
-any Git operations or ClawHub publishing. The task runs:
+Git status checks, commits, tag creation, pushes, and GitHub releases are
+intentionally manual. There are no VS Code tasks for those state-changing steps.
+
+### 1. Prepare the release
+
+Run `Release: Prepare`. This performs local release validation without any Git
+operations or ClawHub publishing. The task runs:
 
 ```bash
 npm run check
 npm test
 npm run build
+clawhub package validate . --out .clawhub/package-validate
 npm pack --dry-run
 ```
 
 The individual subtasks are also available when only one step is needed:
-`NPM: Check`, `NPM: Test`, `NPM: Build`, and `NPM: Pack Dry Run`.
+`NPM: Check`, `NPM: Test`, `NPM: Build`, `ClawHub: Validate`, and
+`NPM: Pack Dry Run`.
 
-After `Release: Prepare` passes, commit the changes, then create and push the
-version tag manually:
+### 2. Optionally run deeper local validation
+
+Run `ClawHub: Validate Runtime With OpenClaw`. This runs
+`npm run clawhub:validate:runtime:openclaw`, uses a sibling OpenClaw source
+checkout, and executes plugin code in the inspector workspace. It is
+intentionally not part of `Release: Prepare`.
+
+### 3. Merge the release changes
+
+Commit and merge the release changes to `main`.
+
+### 4. Tag the merged release commit
+
+Create and push the version tag from the merged `main` commit.
 
 ```bash
 VERSION=$(node -p "require('./package.json').version")
+git switch main
+git pull --ff-only origin main
 git status --short
 git tag "v$VERSION"
 git push origin main "v$VERSION"
 ```
 
-After the tag has been pushed, create the GitHub Release manually in GitHub from
-the `v<version>` tag.
+### 5. Create the GitHub Release
 
-There is no VS Code task for these steps. Git status, commits, tag creation,
-pushes, and releases are intentionally manual.
+Create the GitHub Release manually in GitHub from the `v<version>` tag.
 
-After the tag exists locally, run `ClawHub: Publish Dry Run`. If it passes, run
-`ClawHub: Publish`.
+### 6. Publish to ClawHub
 
-Those tasks run the equivalent of:
+Check out the tagged commit, then run `ClawHub: Publish Dry Run`. If the dry run
+passes, run `ClawHub: Publish`.
 
-```bash
-VERSION=$(node -p "require('./package.json').version")
-clawhub package publish . --family code-plugin --version "$VERSION" --source-ref "v$VERSION" --dry-run
-clawhub package publish . --family code-plugin --version "$VERSION" --source-ref "v$VERSION"
-```
-
-Both tasks read the version from `package.json` and publish with
-`--source-ref v<version>`. They depend on `Release: Verify Version Tag`, which
-fails if the matching version tag does not exist locally and on `origin`.
+The publish tasks call `scripts/clawhub-publish.mjs`. That script reads the
+package version, owner, and source repository from `package.json`, resolves the
+matching release tag commit, and passes explicit ClawHub provenance metadata.
+The tasks depend on `Release: Verify Version Tag`, which fails if the matching
+version tag does not exist locally and on `origin`, if `HEAD` does not match
+that tag, or if the working tree is dirty.

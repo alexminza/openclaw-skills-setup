@@ -4,10 +4,17 @@
   "description": "OpenClaw plugin for running skill setup scripts.",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alexminza/openclaw-skills-setup.git"
+  },
+  "bugs": {
+    "url": "https://github.com/alexminza/openclaw-skills-setup/issues"
+  },
+  "homepage": "https://github.com/alexminza/openclaw-skills-setup#readme",
   "files": [
     "dist/",
     "src/",
-    "scripts/",
     "openclaw.plugin.json",
     "README.md",
     "LICENSE"
@@ -16,7 +23,13 @@
     "build": "tsc -p tsconfig.json && node scripts/bundle-runtime.mjs && npm run check:runtime-imports",
     "check:runtime-imports": "node scripts/check-runtime-imports.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
+    "clawhub:publish": "node scripts/clawhub-publish.mjs",
+    "clawhub:publish:dry-run": "node scripts/clawhub-publish.mjs --dry-run",
+    "clawhub:validate:runtime": "clawhub package validate . --out .clawhub/package-validate-runtime --runtime --allow-execute",
+    "clawhub:validate:runtime:openclaw": "clawhub package validate . --out .clawhub/package-validate-runtime-openclaw --runtime --allow-execute --openclaw ../../openclaw/openclaw",
+    "clawhub:validate": "clawhub package validate . --out .clawhub/package-validate",
     "prepack": "npm run build",
+    "release:verify": "node scripts/verify-release.mjs",
     "test": "vitest run"
   },
   "dependencies": {
