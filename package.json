@@ -40,10 +40,6 @@
     "release:verify": "node scripts/verify-release.mjs",
     "test": "vitest run"
   },
-  "dependencies": {
-    "json5": "^2.2.3",
-    "yaml": "^2.8.4"
-  },
   "peerDependencies": {
     "openclaw": ">=2026.5.5"
   },

@@ -1,11 +1,9 @@
 import { access, readFile, readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
-import JSON5 from "json5";
 import { ErrorCodes, errorShape } from "openclaw/plugin-sdk/gateway-runtime";
 import { resolvePluginConfigObject } from "openclaw/plugin-sdk/plugin-config-runtime";
 import { runPluginCommandWithTimeout } from "openclaw/plugin-sdk/run-command";
 import { extractErrorCode, isPathInside } from "openclaw/plugin-sdk/security-runtime";
-import YAML from "yaml";
 
 // Working plugin implementation for the proposed skill setup lifecycle:
 // https://github.com/openclaw/openclaw/issues/80213
@@ -24,19 +22,18 @@ import YAML from "yaml";
 // skill-local path resolution, or setup-mode env sanitization.
 // The underlying helpers live under src/agents/skills/* and src/infra/*, but the
 // published package's `exports` map limits plugin imports to ./plugin-sdk/*.
-// Until upstream ships public SDK contracts for them, this plugin copies the
-// pinned OpenClaw helpers that already exist internally and keeps only the setup
+// Until upstream ships public SDK contracts for them, this plugin keeps a small
+// local facade shaped like the expected SDK surface and keeps only the setup
 // lifecycle proposal behavior as plugin-specific code.
 // That makes the future migration mechanical: replace the copied helpers with
 // plugin-sdk imports once upstream exports them.
-// Upstream internals copied or adapted below:
+// Upstream internals copied, adapted, or locally mirrored below:
 // - https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/skills/local-loader.ts
 // - https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/skills/workspace.ts
 // - https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/skills/frontmatter.ts
 // - https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/skills/config.ts
 // - https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/skills/env-overrides.ts
 // - https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/sandbox/sanitize-env-vars.ts
-// - https://github.com/openclaw/openclaw/blob/v2026.5.5/src/markdown/frontmatter.ts
 // - https://github.com/openclaw/openclaw/blob/v2026.5.5/src/shared/frontmatter.ts
 
 const PLUGIN_ID = "skills-setup";
@@ -312,193 +309,137 @@ async function resolveInstalledSkillDir({
 
 // #endregion
 
-// #region Copied OpenClaw frontmatter helpers
+// #region Local installed-skill SDK facade
 
 // OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Copied from OpenClaw v2026.5.5 because `parseFrontmatterBlock()` is not
-// exported through `openclaw/plugin-sdk/*`.
-// Upstream source:
-// https://github.com/openclaw/openclaw/blob/v2026.5.5/src/markdown/frontmatter.ts
-// Delete this block when OpenClaw exports the frontmatter parser to plugins.
+// Local facade for the installed-skill SDK surface requested upstream.
+// OpenClaw v2026.5.5 does not expose SKILL.md/frontmatter parsing or structured
+// `metadata.openclaw` access to plugins.
+// This lightweight parser intentionally supports only the setup metadata shapes
+// this plugin documents and tests, instead of bundling a full YAML/JSON5 parser.
+// Migration action: replace this region with OpenClaw's exported installed-skill
+// SDK helpers once they are available.
+// Related upstream sources:
+// https://github.com/openclaw/openclaw/blob/v2026.5.5/src/agents/skills/frontmatter.ts
+// https://github.com/openclaw/openclaw/blob/v2026.5.5/src/shared/frontmatter.ts
 
-type ParsedFrontmatter = Record<string, string>;
+const MANIFEST_KEY = "openclaw";
+const LEGACY_MANIFEST_KEYS = ["clawdbot"] as const;
 
-type ParsedFrontmatterLineEntry = {
-  value: string;
-  kind: "inline" | "multiline";
-  rawInline: string;
+type ParsedSkillFrontmatter = {
+  setupMetadata?: SetupMetadata;
 };
 
-type ParsedYamlValue = {
-  value: string;
-  kind: "scalar" | "structured";
-};
+function readStringValue(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
 
-function stripQuotes(value: string): string {
+function normalizeScalar(raw: string): string {
+  const value = raw.trim();
+  if (!value || value.startsWith("#")) {
+    return "";
+  }
   if (
     (value.startsWith('"') && value.endsWith('"')) ||
     (value.startsWith("'") && value.endsWith("'"))
   ) {
-    return value.slice(1, -1);
+    return value.slice(1, -1).trim();
+  }
+  const commentIndex = value.indexOf(" #");
+  return (commentIndex >= 0 ? value.slice(0, commentIndex) : value).trim();
+}
+
+function stripWrappingQuotes(raw: string): string {
+  const value = raw.trim();
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  ) {
+    return value.slice(1, -1).trim();
   }
   return value;
 }
 
-function coerceYamlFrontmatterValue(value: unknown): ParsedYamlValue | undefined {
-  if (value === null || value === undefined) {
+function mergeSetupMetadata(
+  ...items: Array<Partial<SetupMetadata> | undefined>
+): SetupMetadata | undefined {
+  const merged: SetupMetadata = {};
+  for (const item of items) {
+    if (!isRecord(item)) {
+      continue;
+    }
+    if (typeof item.script === "string" && item.script) {
+      merged.script = item.script;
+    }
+    if (typeof item.skillKey === "string" && item.skillKey) {
+      merged.skillKey = item.skillKey;
+    }
+  }
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
+function readSetupMetadataFromObject(value: unknown): SetupMetadata | undefined {
+  if (!isRecord(value)) {
     return undefined;
   }
-  if (typeof value === "string") {
-    return {
-      value: value.trim(),
-      kind: "scalar",
-    };
-  }
-  if (typeof value === "number" || typeof value === "boolean") {
-    return {
-      value: String(value),
-      kind: "scalar",
-    };
-  }
-  if (typeof value === "object") {
-    try {
-      return {
-        value: JSON.stringify(value),
-        kind: "structured",
-      };
-    } catch {
-      return undefined;
+  for (const manifestKey of [MANIFEST_KEY, ...LEGACY_MANIFEST_KEYS]) {
+    const openclaw = value[manifestKey];
+    if (!isRecord(openclaw)) {
+      continue;
     }
+    return mergeSetupMetadata({
+      script:
+        isRecord(openclaw.setup) && typeof openclaw.setup.script === "string"
+          ? openclaw.setup.script.trim()
+          : undefined,
+      skillKey: typeof openclaw.skillKey === "string" ? openclaw.skillKey.trim() : undefined,
+    });
   }
   return undefined;
 }
 
-function parseYamlFrontmatter(block: string): Record<string, ParsedYamlValue> | null {
+function parseSetupMetadataFromManifestText(raw: string): SetupMetadata | undefined {
+  const value = stripWrappingQuotes(raw);
+  if (!value) {
+    return undefined;
+  }
   try {
-    const parsed = YAML.parse(block, { schema: "core" }) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return null;
+    const parsed = JSON.parse(value) as unknown;
+    const metadata = readSetupMetadataFromObject(parsed);
+    if (metadata) {
+      return metadata;
     }
-    const result: Record<string, ParsedYamlValue> = {};
-    for (const [rawKey, value] of Object.entries(parsed as Record<string, unknown>)) {
-      const key = rawKey.trim();
-      if (!key) {
-        continue;
-      }
-      const coerced = coerceYamlFrontmatterValue(value);
-      if (!coerced) {
-        continue;
-      }
-      result[key] = coerced;
-    }
-    return result;
   } catch {
-    return null;
-  }
-}
-
-function extractMultiLineValue(
-  lines: string[],
-  startIndex: number,
-): {
-  value: string;
-  linesConsumed: number;
-} {
-  const valueLines: string[] = [];
-  let i = startIndex + 1;
-
-  while (i < lines.length) {
-    const line = lines[i];
-    if (line.length > 0 && !line.startsWith(" ") && !line.startsWith("\t")) {
-      break;
-    }
-    valueLines.push(line);
-    i += 1;
+    // Previous approved plugin versions accepted JSON-shaped metadata through a
+    // narrow text fallback. Keep that compatibility until OpenClaw exports the
+    // real frontmatter/manifest parser.
   }
 
-  const combined = valueLines.join("\n").trim();
-  return { value: combined, linesConsumed: i - startIndex };
-}
-
-function parseLineFrontmatter(block: string): Record<string, ParsedFrontmatterLineEntry> {
-  const result: Record<string, ParsedFrontmatterLineEntry> = {};
-  const lines = block.split("\n");
-  let i = 0;
-
-  while (i < lines.length) {
-    const line = lines[i];
-    const match = line.match(/^([\w-]+):\s*(.*)$/);
-    if (!match) {
-      i += 1;
-      continue;
-    }
-
-    const key = match[1];
-    const inlineValue = match[2].trim();
-    if (!key) {
-      i += 1;
-      continue;
-    }
-
-    if (!inlineValue && i + 1 < lines.length) {
-      const nextLine = lines[i + 1];
-      if (nextLine.startsWith(" ") || nextLine.startsWith("\t")) {
-        const { value, linesConsumed } = extractMultiLineValue(lines, i);
-        if (value) {
-          result[key] = {
-            value,
-            kind: "multiline",
-            rawInline: inlineValue,
-          };
-        }
-        i += linesConsumed;
-        continue;
-      }
-    }
-
-    const value = stripQuotes(inlineValue);
-    if (value) {
-      result[key] = {
-        value,
-        kind: "inline",
-        rawInline: inlineValue,
-      };
-    }
-    i += 1;
+  const manifestAlternation = [MANIFEST_KEY, ...LEGACY_MANIFEST_KEYS].join("|");
+  const openclawMatch = new RegExp(
+    `(?:^|[,{}]\\s*)["']?(?:${manifestAlternation})["']?\\s*:`,
+    "u",
+  ).exec(value);
+  if (!openclawMatch) {
+    return undefined;
   }
-
-  return result;
-}
-
-function lineFrontmatterToPlain(
-  parsed: Record<string, ParsedFrontmatterLineEntry>,
-): ParsedFrontmatter {
-  const result: ParsedFrontmatter = {};
-  for (const [key, entry] of Object.entries(parsed)) {
-    result[key] = entry.value;
-  }
-  return result;
-}
-
-function isYamlBlockScalarIndicator(value: string): boolean {
-  return /^[|>][+-]?(\d+)?[+-]?$/.test(value);
-}
-
-function shouldPreferInlineLineValue(params: {
-  lineEntry: ParsedFrontmatterLineEntry;
-  yamlValue: ParsedYamlValue;
-}): boolean {
-  const { lineEntry, yamlValue } = params;
-  if (yamlValue.kind !== "structured") {
-    return false;
-  }
-  if (lineEntry.kind !== "inline") {
-    return false;
-  }
-  if (isYamlBlockScalarIndicator(lineEntry.rawInline)) {
-    return false;
-  }
-  return lineEntry.value.includes(":");
+  const openclawText = value.slice(openclawMatch.index);
+  const scriptMatch =
+    /(?:^|[,{]\s*)["']?setup["']?\s*:\s*\{[\s\S]*?["']?script["']?\s*:\s*(?:"([^"]+)"|'([^']+)'|([^\s,}]+))/u.exec(
+      openclawText,
+    );
+  const skillKeyMatch =
+    /(?:^|[,{]\s*)["']?skillKey["']?\s*:\s*(?:"([^"]+)"|'([^']+)'|([^\s,}]+))/u.exec(
+      openclawText,
+    );
+  return mergeSetupMetadata({
+    script: scriptMatch
+      ? normalizeScalar(scriptMatch[1] ?? scriptMatch[2] ?? scriptMatch[3] ?? "")
+      : undefined,
+    skillKey: skillKeyMatch
+      ? normalizeScalar(skillKeyMatch[1] ?? skillKeyMatch[2] ?? skillKeyMatch[3] ?? "")
+      : undefined,
+  });
 }
 
 function extractFrontmatterBlock(content: string): string | undefined {
@@ -513,94 +454,96 @@ function extractFrontmatterBlock(content: string): string | undefined {
   return normalized.slice(4, endIndex);
 }
 
-function parseFrontmatterBlock(content: string): ParsedFrontmatter {
+function parseIndentedSetupMetadata(frontmatter: string): SetupMetadata | undefined {
+  const lines = frontmatter.split(/\r?\n/u);
+  const stack: Array<{ indent: number; key: string }> = [];
+  const metadata: SetupMetadata = {};
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    if (!line.trim() || line.trimStart().startsWith("#")) {
+      continue;
+    }
+    const match = /^(\s*)([A-Za-z0-9_-]+):(?:\s*(.*))?$/u.exec(line);
+    if (!match) {
+      continue;
+    }
+    const indent = match[1].length;
+    const key = match[2];
+    const rawValue = match[3] ?? "";
+    while (stack.length > 0 && stack[stack.length - 1].indent >= indent) {
+      stack.pop();
+    }
+    const pathKeys = [...stack.map((entry) => entry.key), key];
+    const pathKey = pathKeys.join(".");
+    const normalizedValue = normalizeScalar(rawValue);
+    if (pathKey === `${MANIFEST_KEY}.setup.script` && normalizedValue) {
+      metadata.script = normalizedValue;
+    }
+    if (pathKey === `${MANIFEST_KEY}.skillKey` && normalizedValue) {
+      metadata.skillKey = normalizedValue;
+    }
+    if (!normalizedValue) {
+      stack.push({ indent, key });
+    }
+  }
+  return mergeSetupMetadata(metadata);
+}
+
+function isYamlBlockScalarIndicator(value: string): boolean {
+  return /^[|>][+-]?(\d+)?[+-]?$/u.test(value.trim());
+}
+
+function parseMetadataValueSetupMetadata(frontmatter: string): SetupMetadata | undefined {
+  const lines = frontmatter.split(/\r?\n/u);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    const match = /^metadata:(?:\s*(.*))?$/u.exec(line);
+    if (!match) {
+      continue;
+    }
+    const rawValue = match[1] ?? "";
+    const normalizedValue = normalizeScalar(rawValue);
+    if (normalizedValue && !isYamlBlockScalarIndicator(normalizedValue)) {
+      return parseSetupMetadataFromManifestText(rawValue);
+    }
+
+    const valueLines: string[] = [];
+    for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+      const nextLine = lines[cursor] ?? "";
+      if (nextLine.trim() && !nextLine.startsWith(" ") && !nextLine.startsWith("\t")) {
+        break;
+      }
+      valueLines.push(nextLine.trim());
+    }
+    return parseSetupMetadataFromManifestText(valueLines.join("\n"));
+  }
+  return undefined;
+}
+
+function parseSkillFrontmatter(content: string): ParsedSkillFrontmatter {
   const block = extractFrontmatterBlock(content);
   if (!block) {
     return {};
   }
-
-  const lineParsed = parseLineFrontmatter(block);
-  const yamlParsed = parseYamlFrontmatter(block);
-  if (yamlParsed === null) {
-    return lineFrontmatterToPlain(lineParsed);
-  }
-
-  const merged: ParsedFrontmatter = {};
-  for (const [key, yamlValue] of Object.entries(yamlParsed)) {
-    merged[key] = yamlValue.value;
-    const lineEntry = lineParsed[key];
-    if (!lineEntry) {
-      continue;
-    }
-    if (shouldPreferInlineLineValue({ lineEntry, yamlValue })) {
-      merged[key] = lineEntry.value;
-    }
-  }
-
-  for (const [key, lineEntry] of Object.entries(lineParsed)) {
-    if (!(key in merged)) {
-      merged[key] = lineEntry.value;
-    }
-  }
-
-  return merged;
+  return {
+    setupMetadata: mergeSetupMetadata(
+      parseMetadataValueSetupMetadata(block),
+      parseIndentedSetupMetadata(block),
+    ),
+  };
 }
 
-function parseFrontmatter(content: string): ParsedFrontmatter {
-  return parseFrontmatterBlock(content);
-}
-
-// OpenClaw SDK gap: https://github.com/openclaw/openclaw/issues/81913
-// Adapted from OpenClaw v2026.5.5 because `resolveOpenClawManifestBlock()` is
-// not exported through `openclaw/plugin-sdk/*`.
-// Upstream source:
-// https://github.com/openclaw/openclaw/blob/v2026.5.5/src/shared/frontmatter.ts
-// The local constants mirror OpenClaw's manifest-key constants from:
-// https://github.com/openclaw/openclaw/blob/v2026.5.5/src/compat/legacy-names.ts
-// Migration action when https://github.com/openclaw/openclaw/issues/81913 lands:
-// import the exported manifest resolver and delete this adapted resolver plus
-// the local manifest-key and string-coercion helpers below.
-
-const MANIFEST_KEY = "openclaw";
-const LEGACY_MANIFEST_KEYS = ["clawdbot"] as const;
-
-function readStringValue(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
-}
-
-function getFrontmatterString(
-  frontmatter: Record<string, unknown>,
-  key: string,
-): string | undefined {
-  return readStringValue(frontmatter[key]);
-}
-
-function resolveOpenClawManifestBlock(params: {
-  frontmatter: Record<string, unknown>;
-  key?: string;
-}): Record<string, unknown> | undefined {
-  const raw = getFrontmatterString(params.frontmatter, params.key ?? "metadata");
-  if (!raw) {
+function resolveOpenClawManifestBlock(
+  frontmatter: ParsedSkillFrontmatter,
+): Record<string, unknown> | undefined {
+  const metadata = frontmatter.setupMetadata;
+  if (!metadata) {
     return undefined;
   }
-
-  try {
-    const parsed = JSON5.parse(raw);
-    if (!parsed || typeof parsed !== "object") {
-      return undefined;
-    }
-
-    const manifestKeys = [MANIFEST_KEY, ...LEGACY_MANIFEST_KEYS];
-    for (const key of manifestKeys) {
-      const candidate = (parsed as Record<string, unknown>)[key];
-      if (candidate && typeof candidate === "object") {
-        return candidate as Record<string, unknown>;
-      }
-    }
-    return undefined;
-  } catch {
-    return undefined;
-  }
+  return {
+    ...(metadata.skillKey ? { skillKey: metadata.skillKey } : {}),
+    ...(metadata.script ? { setup: { script: metadata.script } } : {}),
+  };
 }
 
 // #endregion
@@ -610,9 +553,9 @@ function resolveOpenClawManifestBlock(params: {
 // Plugin-specific proposal surface:
 // https://github.com/openclaw/openclaw/issues/80213
 // OpenClaw v2026.5.5 has no setup lifecycle metadata contract.
-// This resolver intentionally uses the copied OpenClaw manifest parser above,
-// but the `setup.script` projection remains local until upstream exposes an
-// official setup metadata contract.
+// This resolver uses the local installed-skill SDK facade above, but the
+// `setup.script` projection remains local until upstream exposes an official
+// setup metadata contract.
 // Migration action when https://github.com/openclaw/openclaw/issues/80213 lands:
 // replace this region with the official setup metadata contract/resolver.
 
@@ -632,7 +575,7 @@ function resolveSetupMetadataFromOpenClawManifest(
 }
 
 function parseSetupMetadataFromSkillMarkdown(markdown: string): SetupMetadata | undefined {
-  const metadataObj = resolveOpenClawManifestBlock({ frontmatter: parseFrontmatter(markdown) });
+  const metadataObj = resolveOpenClawManifestBlock(parseSkillFrontmatter(markdown));
   if (!metadataObj) {
     return undefined;
   }

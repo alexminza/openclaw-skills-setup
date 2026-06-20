@@ -24,26 +24,28 @@ workflow.
 ## Runtime packaging
 
 ClawHub/OpenClaw extracts plugin packages into a plugin directory; it does not
-run `npm install` inside that extracted directory. Runtime dependencies such as
-`json5` and `yaml` therefore must be bundled into the published runtime files.
+run `npm install` inside that extracted directory. Keep runtime dependencies out
+of the plugin unless they are deliberately bundled into the published runtime
+files.
 
 OpenClaw SDK imports stay external. Installed plugin packages declare
 `openclaw` as a peer dependency, and OpenClaw's plugin installer links the host
 package into the plugin so `openclaw/plugin-sdk/*` imports resolve at runtime.
 Keep the startup entrypoint (`dist/index.js`) small and lazy; the larger
 implementation (`dist/skills-setup.impl.js`) is loaded only when `skills.setup`
-is invoked.
+is invoked. Setup metadata parsing stays dependency-free until OpenClaw exposes
+frontmatter and `metadata.openclaw` helpers through the plugin SDK.
 
 `npm run build` owns this shape:
 
 - `tsc` emits declarations and JavaScript into `dist/`
 - `scripts/bundle-runtime.mjs` replaces `dist/skills-setup.impl.js` with a
-  bundled ESM artifact for third-party parser dependencies
-- `scripts/check-runtime-imports.mjs` keeps parser dependencies bundled while
-  allowing host-provided `openclaw/plugin-sdk/*` peer imports
+  single local ESM runtime artifact
+- `scripts/check-runtime-imports.mjs` blocks accidental parser dependencies in
+  the runtime while allowing host-provided `openclaw/plugin-sdk/*` peer imports
 
-Do not remove the bundling step unless OpenClaw installs package dependencies
-for extracted ClawHub plugins or the parser dependencies are no longer needed.
+Do not add runtime parser dependencies unless the build also bundles them and
+the package-size/audit tradeoff is intentional.
 
 ## Release
 

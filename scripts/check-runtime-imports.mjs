@@ -16,13 +16,14 @@ if (sdkRuntimeImportPattern.test(startupSource)) {
 
 const implementationEntryPath = path.join(rootDir, "dist", "skills-setup.impl.js");
 const implementationSource = readFileSync(implementationEntryPath, "utf8");
-// Parser dependencies must stay bundled because extracted plugins do not run
-// npm install. OpenClaw SDK imports are intentionally host-provided peer imports.
+// OpenClaw SDK imports are intentionally host-provided peer imports.
+// Parser libraries should not appear in the runtime now that setup metadata is
+// read by the local lightweight SDK facade.
 const externalRuntimeImportPattern =
   /(?:\bfrom\s*["']|\bimport\s*\(\s*["']|\brequire\s*\(\s*["'])(?:json5|yaml)["']/u;
 
 if (externalRuntimeImportPattern.test(implementationSource)) {
   throw new Error(
-    "dist/skills-setup.impl.js must bundle json5/yaml; extracted OpenClaw plugins are not installed with node_modules.",
+    "dist/skills-setup.impl.js must not import json5/yaml; keep setup metadata parsing dependency-free.",
   );
 }

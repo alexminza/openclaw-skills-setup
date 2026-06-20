@@ -38,13 +38,12 @@ validation, or setup-mode env sanitization. Where possible, this plugin copies
 the pinned OpenClaw behavior locally instead of inventing unrelated semantics,
 so migration to future public SDK exports is mechanical.
 
-The published runtime bundles third-party parser dependencies intentionally.
-ClawHub/OpenClaw extracts plugin packages into a plugin directory and does not
-run `npm install` there, so runtime dependencies such as `json5` and `yaml` must
-be included in the published artifact. OpenClaw SDK imports remain peer imports
-through `openclaw/plugin-sdk/*`, following OpenClaw's plugin dependency
-resolution model. The startup entrypoint remains small and lazy; the larger
-implementation is loaded only when `skills.setup` is invoked.
+The published runtime is dependency-light by design. It keeps OpenClaw SDK
+imports as peer imports through `openclaw/plugin-sdk/*`, following OpenClaw's
+plugin dependency resolution model, and uses a narrow local parser for the setup
+metadata shape instead of bundling full YAML/JSON5 parsers. The startup
+entrypoint remains small and lazy; the larger implementation is loaded only
+when `skills.setup` is invoked.
 
 ## Skill Metadata
 
