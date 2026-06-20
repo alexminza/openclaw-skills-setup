@@ -18,18 +18,48 @@ function gitOk(args) {
   }
 }
 
+function gitMaybe(args) {
+  try {
+    return git(args);
+  } catch {
+    return "";
+  }
+}
+
 if (!gitOk(["rev-parse", "--verify", "--quiet", `refs/tags/${tag}`])) {
   console.error(`Missing local release tag ${tag}. Create it before publishing.`);
   process.exit(1);
 }
 
-if (!gitOk(["ls-remote", "--exit-code", "--tags", "origin", `refs/tags/${tag}`])) {
+const tagCommit = git(["rev-list", "-n", "1", tag]);
+const remoteTagOutput = gitMaybe([
+  "ls-remote",
+  "--exit-code",
+  "--tags",
+  "origin",
+  `refs/tags/${tag}`,
+  `refs/tags/${tag}^{}`,
+]);
+if (!remoteTagOutput) {
   console.error(`Missing remote release tag ${tag} on origin. Push it before publishing.`);
+  process.exit(1);
+}
+const remoteTagCommit = remoteTagOutput
+  .split("\n")
+  .map((line) => line.split(/\s+/))
+  .find(([, ref]) => ref === `refs/tags/${tag}^{}`)?.[0] ??
+  remoteTagOutput
+    .split("\n")
+    .map((line) => line.split(/\s+/))
+    .find(([, ref]) => ref === `refs/tags/${tag}`)?.[0];
+if (remoteTagCommit !== tagCommit) {
+  console.error(
+    `Local ${tag} points to ${tagCommit}, but origin/${tag} points to ${remoteTagCommit}. Sync tags before publishing.`,
+  );
   process.exit(1);
 }
 
 const headCommit = git(["rev-parse", "HEAD"]);
-const tagCommit = git(["rev-list", "-n", "1", tag]);
 if (headCommit !== tagCommit) {
   console.error(
     `HEAD is ${headCommit}, but ${tag} points to ${tagCommit}. Check out the release tag before publishing.`,
