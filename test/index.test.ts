@@ -1,15 +1,23 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { ErrorCodes } from "openclaw/plugin-sdk/gateway-runtime";
-import type { GatewayRequestHandlerOptions } from "openclaw/plugin-sdk/gateway-runtime";
-import { createTestPluginApi } from "openclaw/plugin-sdk/plugin-test-api";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import plugin from "../src/index.js";
 
-type TestPluginApi = ReturnType<typeof createTestPluginApi>;
-type GatewayHandler = Parameters<TestPluginApi["registerGatewayMethod"]>[1];
-type GatewayMethodOptions = Parameters<TestPluginApi["registerGatewayMethod"]>[2];
+const ErrorCodes = {
+  INVALID_REQUEST: "INVALID_REQUEST",
+  UNAVAILABLE: "UNAVAILABLE",
+} as const;
+
+type GatewayRequestHandlerOptions = {
+  params?: Record<string, unknown>;
+  respond: ReturnType<typeof vi.fn>;
+  context: {
+    getRuntimeConfig: () => Record<string, unknown>;
+  };
+};
+type GatewayHandler = (options: GatewayRequestHandlerOptions) => Promise<void> | void;
+type GatewayMethodOptions = { scope: string };
 
 const commandMocks = vi.hoisted(() => ({
   runPluginCommandWithTimeout: vi.fn(async () => ({
@@ -19,7 +27,7 @@ const commandMocks = vi.hoisted(() => ({
   })),
 }));
 
-vi.mock("openclaw/plugin-sdk/sandbox", () => ({
+vi.mock("openclaw/plugin-sdk/run-command", () => ({
   runPluginCommandWithTimeout: commandMocks.runPluginCommandWithTimeout,
 }));
 
@@ -73,12 +81,12 @@ function registerSkillsSetupPlugin({
   let options: GatewayMethodOptions;
   const registerGatewayMethod = vi.fn(
     (method: string, nextHandler: GatewayHandler, nextOptions: GatewayMethodOptions) => {
-    expect(method).toBe("skills.setup");
-    handler = nextHandler;
-    options = nextOptions;
+      expect(method).toBe("skills.setup");
+      handler = nextHandler;
+      options = nextOptions;
     },
   );
-  const api = createTestPluginApi({
+  const api = {
     logger: {
       info: vi.fn(),
       warn: vi.fn(),
@@ -89,9 +97,9 @@ function registerSkillsSetupPlugin({
       agent: {
         resolveAgentWorkspaceDir: vi.fn(() => workspaceDir),
       },
-    } as unknown as TestPluginApi["runtime"],
+    },
     registerGatewayMethod,
-  });
+  };
 
   plugin.register(api);
   if (!handler) {
@@ -116,7 +124,7 @@ async function callGatewayMethod({
     context: {
       getRuntimeConfig: () => config,
     },
-  } as unknown as GatewayRequestHandlerOptions);
+  });
   return respond;
 }
 
