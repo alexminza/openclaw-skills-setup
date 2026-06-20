@@ -3,10 +3,18 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const importSpecifierStartPattern = String.raw`(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*)`;
+const optionalModuleSubpathPattern = "(?:\\/[^\"'`]*)?";
+
+function quotedImportSpecifierPattern(modulePattern) {
+  return new RegExp(`${importSpecifierStartPattern}(["'\`])${modulePattern}\\1`, "u");
+}
+
 const startupEntryPath = path.join(rootDir, "dist", "index.js");
 const startupSource = readFileSync(startupEntryPath, "utf8");
-const sdkRuntimeImportPattern =
-  /(?:\bfrom\s*["']|\bimport\s*\(\s*["']|\brequire\s*\(\s*["'])(?:openclaw|@openclaw)\/plugin-sdk(?:\/[^"']*)?["']/u;
+const sdkRuntimeImportPattern = quotedImportSpecifierPattern(
+  `(?:openclaw|@openclaw)\\/plugin-sdk${optionalModuleSubpathPattern}`,
+);
 
 if (sdkRuntimeImportPattern.test(startupSource)) {
   throw new Error(
@@ -19,8 +27,9 @@ const implementationSource = readFileSync(implementationEntryPath, "utf8");
 // OpenClaw SDK imports are intentionally host-provided peer imports.
 // Parser libraries are direct plugin dependencies and must stay external so the
 // plugin package manager can provision them normally.
-const forbiddenRuntimeImportPattern =
-  /(?:\bfrom\s*["']|\bimport\s*\(\s*["']|\brequire\s*\(\s*["'])(?:(?:node:)?child_process|openclaw\/(?:dist|node_modules)(?:\/[^"']*)?)["']/u;
+const forbiddenRuntimeImportPattern = quotedImportSpecifierPattern(
+  `(?:(?:node:)?child_process|openclaw\\/(?:dist|node_modules)${optionalModuleSubpathPattern})`,
+);
 
 if (forbiddenRuntimeImportPattern.test(implementationSource)) {
   throw new Error(
