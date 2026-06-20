@@ -17,13 +17,13 @@ if (sdkRuntimeImportPattern.test(startupSource)) {
 const implementationEntryPath = path.join(rootDir, "dist", "skills-setup.impl.js");
 const implementationSource = readFileSync(implementationEntryPath, "utf8");
 // OpenClaw SDK imports are intentionally host-provided peer imports.
-// Parser libraries should not appear in the runtime now that setup metadata is
-// read by the local lightweight SDK facade.
-const externalRuntimeImportPattern =
-  /(?:\bfrom\s*["']|\bimport\s*\(\s*["']|\brequire\s*\(\s*["'])(?:json5|yaml)["']/u;
+// Parser libraries are direct plugin dependencies and must stay external so the
+// plugin package manager can provision them normally.
+const forbiddenRuntimeImportPattern =
+  /(?:\bfrom\s*["']|\bimport\s*\(\s*["']|\brequire\s*\(\s*["'])(?:(?:node:)?child_process|openclaw\/(?:dist|node_modules)(?:\/[^"']*)?)["']/u;
 
-if (externalRuntimeImportPattern.test(implementationSource)) {
+if (forbiddenRuntimeImportPattern.test(implementationSource)) {
   throw new Error(
-    "dist/skills-setup.impl.js must not import json5/yaml; keep setup metadata parsing dependency-free.",
+    "dist/skills-setup.impl.js must not import child_process or unsupported OpenClaw deep paths.",
   );
 }

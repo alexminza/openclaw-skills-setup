@@ -28,7 +28,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/bundle-runtime.mjs && npm run check:runtime-imports",
+    "build": "tsc -p tsconfig.json && npm run check:runtime-imports",
     "check:runtime-imports": "node scripts/check-runtime-imports.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
     "clawhub:publish": "node scripts/clawhub-publish.mjs",
@@ -43,9 +43,12 @@
   "peerDependencies": {
     "openclaw": ">=2026.5.5"
   },
+  "dependencies": {
+    "json5": "^2.2.3",
+    "yaml": "^2.8.4"
+  },
   "devDependencies": {
     "@types/node": "^26.0.0",
-    "esbuild": "^0.27.7",
     "openclaw": "2026.5.5",
     "typescript": "^5.8.3",
     "vitest": "^3.1.4"

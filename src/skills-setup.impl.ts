@@ -1,9 +1,11 @@
 import { access, readFile, readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
+import JSON5 from "json5";
 import { ErrorCodes, errorShape } from "openclaw/plugin-sdk/gateway-runtime";
 import { resolvePluginConfigObject } from "openclaw/plugin-sdk/plugin-config-runtime";
 import { runPluginCommandWithTimeout } from "openclaw/plugin-sdk/run-command";
 import { extractErrorCode, isPathInside } from "openclaw/plugin-sdk/security-runtime";
+import YAML from "yaml";
 
 // Working plugin implementation for the proposed skill setup lifecycle:
 // https://github.com/openclaw/openclaw/issues/80213
@@ -315,8 +317,9 @@ async function resolveInstalledSkillDir({
 // Local facade for the installed-skill SDK surface requested upstream.
 // OpenClaw v2026.5.5 does not expose SKILL.md/frontmatter parsing or structured
 // `metadata.openclaw` access to plugins.
-// This lightweight parser intentionally supports only the setup metadata shapes
-// this plugin documents and tests, instead of bundling a full YAML/JSON5 parser.
+// This local facade uses the same parser classes OpenClaw core uses for
+// frontmatter and JSON-shaped manifest blocks, but keeps them as direct plugin
+// dependencies until OpenClaw exports this capability through plugin-sdk.
 // Migration action: replace this region with OpenClaw's exported installed-skill
 // SDK helpers once they are available.
 // Related upstream sources:
@@ -326,120 +329,10 @@ async function resolveInstalledSkillDir({
 const MANIFEST_KEY = "openclaw";
 const LEGACY_MANIFEST_KEYS = ["clawdbot"] as const;
 
-type ParsedSkillFrontmatter = {
-  setupMetadata?: SetupMetadata;
-};
+type ParsedSkillFrontmatter = Record<string, unknown>;
 
 function readStringValue(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
-}
-
-function normalizeScalar(raw: string): string {
-  const value = raw.trim();
-  if (!value || value.startsWith("#")) {
-    return "";
-  }
-  if (
-    (value.startsWith('"') && value.endsWith('"')) ||
-    (value.startsWith("'") && value.endsWith("'"))
-  ) {
-    return value.slice(1, -1).trim();
-  }
-  const commentIndex = value.indexOf(" #");
-  return (commentIndex >= 0 ? value.slice(0, commentIndex) : value).trim();
-}
-
-function stripWrappingQuotes(raw: string): string {
-  const value = raw.trim();
-  if (
-    (value.startsWith('"') && value.endsWith('"')) ||
-    (value.startsWith("'") && value.endsWith("'"))
-  ) {
-    return value.slice(1, -1).trim();
-  }
-  return value;
-}
-
-function mergeSetupMetadata(
-  ...items: Array<Partial<SetupMetadata> | undefined>
-): SetupMetadata | undefined {
-  const merged: SetupMetadata = {};
-  for (const item of items) {
-    if (!isRecord(item)) {
-      continue;
-    }
-    if (typeof item.script === "string" && item.script) {
-      merged.script = item.script;
-    }
-    if (typeof item.skillKey === "string" && item.skillKey) {
-      merged.skillKey = item.skillKey;
-    }
-  }
-  return Object.keys(merged).length > 0 ? merged : undefined;
-}
-
-function readSetupMetadataFromObject(value: unknown): SetupMetadata | undefined {
-  if (!isRecord(value)) {
-    return undefined;
-  }
-  for (const manifestKey of [MANIFEST_KEY, ...LEGACY_MANIFEST_KEYS]) {
-    const openclaw = value[manifestKey];
-    if (!isRecord(openclaw)) {
-      continue;
-    }
-    return mergeSetupMetadata({
-      script:
-        isRecord(openclaw.setup) && typeof openclaw.setup.script === "string"
-          ? openclaw.setup.script.trim()
-          : undefined,
-      skillKey: typeof openclaw.skillKey === "string" ? openclaw.skillKey.trim() : undefined,
-    });
-  }
-  return undefined;
-}
-
-function parseSetupMetadataFromManifestText(raw: string): SetupMetadata | undefined {
-  const value = stripWrappingQuotes(raw);
-  if (!value) {
-    return undefined;
-  }
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    const metadata = readSetupMetadataFromObject(parsed);
-    if (metadata) {
-      return metadata;
-    }
-  } catch {
-    // Previous approved plugin versions accepted JSON-shaped metadata through a
-    // narrow text fallback. Keep that compatibility until OpenClaw exports the
-    // real frontmatter/manifest parser.
-  }
-
-  const manifestAlternation = [MANIFEST_KEY, ...LEGACY_MANIFEST_KEYS].join("|");
-  const openclawMatch = new RegExp(
-    `(?:^|[,{}]\\s*)["']?(?:${manifestAlternation})["']?\\s*:`,
-    "u",
-  ).exec(value);
-  if (!openclawMatch) {
-    return undefined;
-  }
-  const openclawText = value.slice(openclawMatch.index);
-  const scriptMatch =
-    /(?:^|[,{]\s*)["']?setup["']?\s*:\s*\{[\s\S]*?["']?script["']?\s*:\s*(?:"([^"]+)"|'([^']+)'|([^\s,}]+))/u.exec(
-      openclawText,
-    );
-  const skillKeyMatch =
-    /(?:^|[,{]\s*)["']?skillKey["']?\s*:\s*(?:"([^"]+)"|'([^']+)'|([^\s,}]+))/u.exec(
-      openclawText,
-    );
-  return mergeSetupMetadata({
-    script: scriptMatch
-      ? normalizeScalar(scriptMatch[1] ?? scriptMatch[2] ?? scriptMatch[3] ?? "")
-      : undefined,
-    skillKey: skillKeyMatch
-      ? normalizeScalar(skillKeyMatch[1] ?? skillKeyMatch[2] ?? skillKeyMatch[3] ?? "")
-      : undefined,
-  });
 }
 
 function extractFrontmatterBlock(content: string): string | undefined {
@@ -454,96 +347,41 @@ function extractFrontmatterBlock(content: string): string | undefined {
   return normalized.slice(4, endIndex);
 }
 
-function parseIndentedSetupMetadata(frontmatter: string): SetupMetadata | undefined {
-  const lines = frontmatter.split(/\r?\n/u);
-  const stack: Array<{ indent: number; key: string }> = [];
-  const metadata: SetupMetadata = {};
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index] ?? "";
-    if (!line.trim() || line.trimStart().startsWith("#")) {
-      continue;
-    }
-    const match = /^(\s*)([A-Za-z0-9_-]+):(?:\s*(.*))?$/u.exec(line);
-    if (!match) {
-      continue;
-    }
-    const indent = match[1].length;
-    const key = match[2];
-    const rawValue = match[3] ?? "";
-    while (stack.length > 0 && stack[stack.length - 1].indent >= indent) {
-      stack.pop();
-    }
-    const pathKeys = [...stack.map((entry) => entry.key), key];
-    const pathKey = pathKeys.join(".");
-    const normalizedValue = normalizeScalar(rawValue);
-    if (pathKey === `${MANIFEST_KEY}.setup.script` && normalizedValue) {
-      metadata.script = normalizedValue;
-    }
-    if (pathKey === `${MANIFEST_KEY}.skillKey` && normalizedValue) {
-      metadata.skillKey = normalizedValue;
-    }
-    if (!normalizedValue) {
-      stack.push({ indent, key });
-    }
-  }
-  return mergeSetupMetadata(metadata);
-}
-
-function isYamlBlockScalarIndicator(value: string): boolean {
-  return /^[|>][+-]?(\d+)?[+-]?$/u.test(value.trim());
-}
-
-function parseMetadataValueSetupMetadata(frontmatter: string): SetupMetadata | undefined {
-  const lines = frontmatter.split(/\r?\n/u);
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index] ?? "";
-    const match = /^metadata:(?:\s*(.*))?$/u.exec(line);
-    if (!match) {
-      continue;
-    }
-    const rawValue = match[1] ?? "";
-    const normalizedValue = normalizeScalar(rawValue);
-    if (normalizedValue && !isYamlBlockScalarIndicator(normalizedValue)) {
-      return parseSetupMetadataFromManifestText(rawValue);
-    }
-
-    const valueLines: string[] = [];
-    for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
-      const nextLine = lines[cursor] ?? "";
-      if (nextLine.trim() && !nextLine.startsWith(" ") && !nextLine.startsWith("\t")) {
-        break;
-      }
-      valueLines.push(nextLine.trim());
-    }
-    return parseSetupMetadataFromManifestText(valueLines.join("\n"));
-  }
-  return undefined;
-}
-
 function parseSkillFrontmatter(content: string): ParsedSkillFrontmatter {
   const block = extractFrontmatterBlock(content);
   if (!block) {
     return {};
   }
-  return {
-    setupMetadata: mergeSetupMetadata(
-      parseMetadataValueSetupMetadata(block),
-      parseIndentedSetupMetadata(block),
-    ),
-  };
+  let parsed: unknown;
+  try {
+    parsed = YAML.parse(block, { schema: "core" }) as unknown;
+  } catch {
+    return {};
+  }
+  return isRecord(parsed) ? parsed : {};
 }
 
 function resolveOpenClawManifestBlock(
   frontmatter: ParsedSkillFrontmatter,
 ): Record<string, unknown> | undefined {
-  const metadata = frontmatter.setupMetadata;
-  if (!metadata) {
+  let metadata = frontmatter.metadata;
+  if (typeof metadata === "string") {
+    try {
+      metadata = JSON5.parse(metadata) as unknown;
+    } catch {
+      return undefined;
+    }
+  }
+  if (!isRecord(metadata)) {
     return undefined;
   }
-  return {
-    ...(metadata.skillKey ? { skillKey: metadata.skillKey } : {}),
-    ...(metadata.script ? { setup: { script: metadata.script } } : {}),
-  };
+  for (const manifestKey of [MANIFEST_KEY, ...LEGACY_MANIFEST_KEYS]) {
+    const manifestBlock = metadata[manifestKey];
+    if (isRecord(manifestBlock)) {
+      return manifestBlock;
+    }
+  }
+  return undefined;
 }
 
 // #endregion

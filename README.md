@@ -38,11 +38,11 @@ validation, or setup-mode env sanitization. Where possible, this plugin copies
 the pinned OpenClaw behavior locally instead of inventing unrelated semantics,
 so migration to future public SDK exports is mechanical.
 
-The published runtime is dependency-light by design. It keeps OpenClaw SDK
-imports as peer imports through `openclaw/plugin-sdk/*`, following OpenClaw's
-plugin dependency resolution model, and uses a narrow local parser for the setup
-metadata shape instead of bundling full YAML/JSON5 parsers. The startup
-entrypoint remains small and lazy; the larger implementation is loaded only
+The published runtime keeps OpenClaw SDK imports as peer imports through
+`openclaw/plugin-sdk/*`, following OpenClaw's plugin dependency resolution
+model. SKILL.md parsing uses direct `yaml` and `json5` dependencies rather than
+reimplementing frontmatter parsing locally. The startup entrypoint remains small
+and lazy; the larger implementation and parser dependencies are loaded only
 when `skills.setup` is invoked.
 
 ## Skill Metadata
@@ -62,6 +62,7 @@ metadata:
 ```
 
 The `setup.script` value must be a relative path inside the skill directory.
+`setup.script` and `skillKey` must be strings; quote numeric-looking values.
 
 ## Runtime Behavior
 

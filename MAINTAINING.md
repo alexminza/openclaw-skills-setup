@@ -6,8 +6,8 @@ ClawHub package.
 ## Upstream SDK Gap
 
 This plugin currently carries small local implementations for installed-skill
-resolution, SKILL.md setup metadata parsing, setup script path validation, skill
-env config reading, and setup env sanitization.
+resolution, SKILL.md setup metadata projection, setup script path validation,
+skill env config reading, and setup env sanitization.
 
 Those helpers duplicate OpenClaw internals because `openclaw@2026.5.5` does not
 expose the needed installed-skill workflow helpers through public
@@ -17,35 +17,33 @@ APIs is tracked in
 [openclaw/openclaw#81913](https://github.com/openclaw/openclaw/issues/81913).
 
 After that SDK surface is merged and released, update the pinned OpenClaw
-development dependency and replace the local parser/resolver/sanitizer code
-with public SDK imports where the exported contracts fit this plugin's setup
-workflow.
+development dependency and replace the local resolver/sanitizer code and
+frontmatter/metadata projection with public SDK imports where the exported
+contracts fit this plugin's setup workflow.
 
 ## Runtime packaging
 
-ClawHub/OpenClaw extracts plugin packages into a plugin directory; it does not
-run `npm install` inside that extracted directory. Keep runtime dependencies out
-of the plugin unless they are deliberately bundled into the published runtime
-files.
+Normal OpenClaw-managed plugin installs provision package dependencies for the
+installed plugin. Keep runtime dependencies explicit in `package.json` rather
+than importing OpenClaw's transitive dependencies or deep paths.
 
 OpenClaw SDK imports stay external. Installed plugin packages declare
 `openclaw` as a peer dependency, and OpenClaw's plugin installer links the host
 package into the plugin so `openclaw/plugin-sdk/*` imports resolve at runtime.
 Keep the startup entrypoint (`dist/index.js`) small and lazy; the larger
-implementation (`dist/skills-setup.impl.js`) is loaded only when `skills.setup`
-is invoked. Setup metadata parsing stays dependency-free until OpenClaw exposes
-frontmatter and `metadata.openclaw` helpers through the plugin SDK.
+implementation (`dist/skills-setup.impl.js`) and parser dependencies are loaded
+only when `skills.setup` is invoked.
 
 `npm run build` owns this shape:
 
 - `tsc` emits declarations and JavaScript into `dist/`
-- `scripts/bundle-runtime.mjs` replaces `dist/skills-setup.impl.js` with a
-  single local ESM runtime artifact
-- `scripts/check-runtime-imports.mjs` blocks accidental parser dependencies in
-  the runtime while allowing host-provided `openclaw/plugin-sdk/*` peer imports
+- `scripts/check-runtime-imports.mjs` keeps the startup entrypoint free of
+  eager OpenClaw SDK imports and blocks unsupported OpenClaw deep imports in
+  the implementation
 
-Do not add runtime parser dependencies unless the build also bundles them and
-the package-size/audit tradeoff is intentional.
+Do not import from `openclaw/dist/*` or `openclaw/node_modules/*`. If a library
+is needed at runtime and is not part of the public OpenClaw plugin SDK, declare
+it as a direct plugin dependency.
 
 ## Release
 
