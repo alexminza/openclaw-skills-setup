@@ -17,7 +17,7 @@ type PluginApi = {
 export default {
   id: "skills-setup",
   name: "Skills Setup",
-  description: "Runs installed skill setup scripts through the admin-only skills.setup gateway RPC.",
+  description: "Runs trusted installed skill setup scripts through the admin-only skills.setup Gateway RPC.",
   register(api: PluginApi) {
     api.registerGatewayMethod(
       METHOD_NAME,

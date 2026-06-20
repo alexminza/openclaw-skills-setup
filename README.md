@@ -1,12 +1,14 @@
 # Skills Setup
 
-Runs setup scripts declared by installed OpenClaw skills.
+Runs trusted setup scripts declared by installed OpenClaw skills through an
+admin-only Gateway RPC.
 
 This plugin registers the admin-only `skills.setup` Gateway RPC. Callers can use
 it to run an idempotent setup script from an installed skill directory, for
 example to install local dependencies or prepare tool-specific configuration.
-Setup scripts run with the agent process user's local privileges, so invoke this
-RPC only for skills you trust and after reviewing the declared setup script.
+Setup scripts run with `bash` and the agent process user's local privileges, so
+invoke this RPC only for skills you trust and after reviewing the declared setup
+script.
 
 ## Background
 
@@ -107,10 +109,18 @@ restricted to `operator.admin`. Scripts must resolve inside the skill directory,
 and path escapes are rejected before execution. Review the setup script and the
 env values you pass before invoking setup, especially when providing secrets.
 
+Local code execution is expected for this plugin. Installed skills may already
+ship executable setup assets; this plugin provides an explicit admin-only RPC to
+run the reviewed, skill-local setup script declared by the skill.
+
 Treat every setup script as a local shell script from the target skill. It can
 install packages, write files, call network services, or make other local
 changes allowed by the agent process user's permissions. Run setup only for
 trusted skills.
+
+The plugin's path and env checks ensure the selected script is skill-local and
+block common execution-context overrides before running it. The setup script
+itself still runs as trusted local code.
 
 Environment variables can include credentials needed by a setup workflow. The
 plugin blocks execution-context overrides and bash startup/function injection
@@ -118,6 +128,14 @@ variables, but any allowed secret passed through skill config or request env is
 available to the setup script. Prefer narrowly scoped credentials and avoid
 passing secrets to skills from untrusted sources.
 
+Credential handling follows the installed skill trust boundary. The plugin does
+not discover or grant new credentials on its own; it passes only explicit skill
+config or request env values to the reviewed setup script for the trusted
+installed skill.
+
 Setup scripts must be idempotent. The plugin does not track whether setup has
 already run for a skill, so repeated calls can repeat side effects such as
 dependency installation, config writes, or external API calls.
+Those repeated effects come only from deliberate `skills.setup` invocations; the
+plugin does not schedule setup, retry setup, or run setup automatically after
+installation.

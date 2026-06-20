@@ -1,7 +1,15 @@
 {
   "name": "@alexminza/skills-setup",
   "version": "2026.6.20",
-  "description": "OpenClaw plugin for running skill setup scripts.",
+  "description": "Admin-only OpenClaw plugin for running trusted installed skill setup scripts.",
+  "keywords": [
+    "openclaw",
+    "plugin",
+    "skills",
+    "setup",
+    "gateway",
+    "operator-admin"
+  ],
   "type": "module",
   "license": "MIT",
   "repository": {
