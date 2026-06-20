@@ -1,6 +1,6 @@
 {
   "name": "@alexminza/skills-setup",
-  "version": "2026.5.17",
+  "version": "2026.6.20",
   "description": "OpenClaw plugin for running skill setup scripts.",
   "type": "module",
   "license": "MIT",

@@ -5,7 +5,7 @@ import { ErrorCodes } from "openclaw/plugin-sdk/gateway-runtime";
 import type { GatewayRequestHandlerOptions } from "openclaw/plugin-sdk/gateway-runtime";
 import { createTestPluginApi } from "openclaw/plugin-sdk/plugin-test-api";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import plugin from "../src/index.js";
+import plugin, { __setRunPluginCommandWithTimeoutForTest } from "../src/index.js";
 
 type TestPluginApi = ReturnType<typeof createTestPluginApi>;
 type GatewayHandler = Parameters<TestPluginApi["registerGatewayMethod"]>[1];
@@ -17,10 +17,6 @@ const commandMocks = vi.hoisted(() => ({
     stdout: "setup ok",
     stderr: "",
   })),
-}));
-
-vi.mock("openclaw/plugin-sdk/sandbox", () => ({
-  runPluginCommandWithTimeout: commandMocks.runPluginCommandWithTimeout,
 }));
 
 const tempDirs: string[] = [];
@@ -127,9 +123,11 @@ beforeEach(() => {
     stdout: "setup ok",
     stderr: "",
   });
+  __setRunPluginCommandWithTimeoutForTest(commandMocks.runPluginCommandWithTimeout);
 });
 
 afterEach(async () => {
+  __setRunPluginCommandWithTimeoutForTest(null);
   vi.unstubAllEnvs();
   await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
 });

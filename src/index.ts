@@ -1,10 +1,12 @@
+import { spawn } from "node:child_process";
 import { access, readFile, readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
-import { ErrorCodes, errorShape } from "openclaw/plugin-sdk/gateway-runtime";
 import type { GatewayRequestHandlerOptions } from "openclaw/plugin-sdk/gateway-runtime";
-import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { runPluginCommandWithTimeout } from "openclaw/plugin-sdk/sandbox";
-import { isPathInside } from "openclaw/plugin-sdk/security-runtime";
+import type {
+  OpenClawPluginApi,
+  OpenClawPluginConfigSchema,
+  OpenClawPluginDefinition,
+} from "openclaw/plugin-sdk/plugin-entry";
 
 // Plugin-shaped implementation path for openclaw/openclaw#80213:
 // https://github.com/openclaw/openclaw/issues/80213
@@ -26,6 +28,12 @@ import { isPathInside } from "openclaw/plugin-sdk/security-runtime";
 
 const METHOD_NAME = "skills.setup";
 const PLUGIN_ID = "skills-setup";
+const ErrorCodes = {
+  INVALID_REQUEST: "INVALID_REQUEST",
+  UNAVAILABLE: "UNAVAILABLE",
+} as const;
+const PARENT_SEGMENT_PATTERN = /^\.\.(?:[\\/]|$)/u;
+const POSIX_SEPARATOR_CHAR_CODE = 47;
 const DEFAULT_AGENT_ID = "main";
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
@@ -62,6 +70,32 @@ const BLOCKED_INHERITED_ENV_KEYS = new Set([
 ]);
 
 type EnvMap = Record<string, string>;
+type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];
+type CommandResult = {
+  code: number;
+  stdout: string;
+  stderr: string;
+};
+type CommandRunnerOptions = {
+  argv: string[];
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  timeoutMs: number;
+};
+type DefinePluginEntryOptions = {
+  id: string;
+  name: string;
+  description: string;
+  configSchema?: OpenClawPluginConfigSchema | (() => OpenClawPluginConfigSchema);
+  register: (api: OpenClawPluginApi) => void;
+};
+type DefinedPluginEntry = {
+  id: string;
+  name: string;
+  description: string;
+  configSchema?: OpenClawPluginConfigSchema;
+  register: NonNullable<OpenClawPluginDefinition["register"]>;
+};
 
 type SetupMetadata = {
   script?: string;
@@ -73,6 +107,9 @@ type SetupScriptResolution = {
   skillKey?: string;
 };
 
+// Keep runtime SDK helpers local so the published plugin can load through
+// native ESM. OpenClaw 2026.5.5 force-transforms plugins with value imports
+// from openclaw/plugin-sdk/*, which made this plugin dominate startup time.
 function hasErrorCode(error: unknown, code: string): boolean {
   return Boolean(
     error &&
@@ -80,6 +117,123 @@ function hasErrorCode(error: unknown, code: string): boolean {
       "code" in error &&
       (error as { code?: unknown }).code === code,
   );
+}
+
+function definePluginEntry({
+  id,
+  name,
+  description,
+  configSchema,
+  register,
+}: DefinePluginEntryOptions): DefinedPluginEntry {
+  return {
+    id,
+    name,
+    description,
+    ...(configSchema ? { configSchema: typeof configSchema === "function" ? configSchema() : configSchema } : {}),
+    register,
+  };
+}
+
+function errorShape(code: ErrorCode, message: string): { code: ErrorCode; message: string } {
+  return { code, message };
+}
+
+function formatErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function runPluginCommandWithTimeout(options: CommandRunnerOptions): Promise<CommandResult> {
+  const [command, ...args] = options.argv;
+  if (!command) {
+    return Promise.resolve({
+      code: 1,
+      stdout: "",
+      stderr: "command is required",
+    });
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let timedOut = false;
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: { ...process.env, ...options.env } as NodeJS.ProcessEnv,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    const finish = (result: CommandResult): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+    }, options.timeoutMs);
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdoutChunks.push(chunk);
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderrChunks.push(chunk);
+    });
+    child.on("error", (error) => {
+      finish({
+        code: 1,
+        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+        stderr: formatErrorMessage(error),
+      });
+    });
+    child.on("close", (code) => {
+      const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+      const stderr = Buffer.concat(stderrChunks).toString("utf8");
+      finish({
+        code: code ?? 1,
+        stdout,
+        stderr: timedOut && !stderr ? `command timed out after ${options.timeoutMs}ms` : stderr,
+      });
+    });
+  });
+}
+
+let runSetupCommand = runPluginCommandWithTimeout;
+
+export function __setRunPluginCommandWithTimeoutForTest(
+  commandRunner: typeof runPluginCommandWithTimeout | null,
+): void {
+  runSetupCommand = commandRunner ?? runPluginCommandWithTimeout;
+}
+
+function isPathInside(root: string, target: string): boolean {
+  if (process.platform === "win32") {
+    const rootForCompare = path.win32.normalize(path.win32.resolve(root)).toLowerCase();
+    const targetForCompare = path.win32.normalize(path.win32.resolve(target)).toLowerCase();
+    const relative = path.win32.relative(rootForCompare, targetForCompare);
+    return relative === "" || (!PARENT_SEGMENT_PATTERN.test(relative) && !path.win32.isAbsolute(relative));
+  }
+
+  if (
+    root.length > 0 &&
+    root.charCodeAt(0) === POSIX_SEPARATOR_CHAR_CODE &&
+    target.length >= root.length &&
+    target.charCodeAt(0) === POSIX_SEPARATOR_CHAR_CODE &&
+    !target.includes("/..") &&
+    (target === root || (target.startsWith(root) && target.charCodeAt(root.length) === POSIX_SEPARATOR_CHAR_CODE))
+  ) {
+    return true;
+  }
+
+  const resolvedRoot = path.resolve(root);
+  const resolvedTarget = path.resolve(target);
+  const relative = path.relative(resolvedRoot, resolvedTarget);
+  return relative === "" || (!PARENT_SEGMENT_PATTERN.test(relative) && !path.isAbsolute(relative));
 }
 
 // #region Basic request/config normalization
@@ -655,7 +809,7 @@ export default definePluginEntry({
           // is registered with operator.admin scope, setup.script is constrained
           // to the resolved skill directory, and no completion state is stored,
           // so setup scripts must be safe to rerun.
-          const result = await runPluginCommandWithTimeout({
+          const result = await runSetupCommand({
             argv: ["bash", scriptPath],
             cwd: skillDir,
             env: buildSetupEnv({
